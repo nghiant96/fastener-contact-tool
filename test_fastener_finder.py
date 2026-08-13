@@ -173,6 +173,34 @@ def test_qualify_new_european_country():
     assert q["status"] in ("qualified", "review")
 
 
+def test_build_queries_deep_geo_expands_us_states():
+    regions = {"USA": (["USA", "Texas", "Ohio"], "us-en")}
+    shallow = ff.build_queries(products=["bolts"], roles=["manufacturer"],
+                               regions=regions)
+    deep = ff.build_queries(regions=regions, deep_geo=True)
+    assert len(shallow) == 1 and "USA" in shallow[0][0]
+    geos = {"Texas", "Ohio", "USA"}
+    assert all(any(g in q[0] for g in geos) for q in deep)
+    assert any("Texas" in q[0] for q in deep)
+    # deep_geo cộng thêm từ khoá đặc thù Mỹ (ASTM/SAE...)
+    assert any("ASTM" in q[0] or "SAE" in q[0] or "grade 8" in q[0]
+               for q in deep)
+
+
+def test_build_queries_dedupes():
+    regions = {"USA": (["USA", "USA"], "us-en")}
+    out = ff.build_queries(products=["bolts"], roles=["manufacturer"],
+                           regions=regions, deep_geo=True)
+    assert len(out) == len({q[0] for q in out})
+
+
+def test_cycle_queries_can_hit_us_states():
+    regions = {"USA": ff.REGIONS["USA"]}
+    qs = ff.build_cycle_queries(120, seed=7, regions=regions)
+    text = " ".join(q[0] for q in qs)
+    assert any(state in text for state in ("Texas", "Ohio", "Michigan"))
+
+
 def test_cli_rejects_nonpositive():
     with pytest.raises(SystemExit):
         ff.main(["--loop", "0"])

@@ -65,9 +65,29 @@ ROLES = ["manufacturer", "importer", "distributor", "supplier", "wholesaler"]
 
 EXTRA_MODIFIERS = ["", "company", "factory", "stockist", "ISO 9001", "OEM"]
 
+# Từ khoá đặc thù thị trường Mỹ (tiêu chuẩn ASTM/SAE/UNC, hệ inch)
+US_PRODUCTS = [
+    "grade 8 bolts", "grade 5 bolts", "ASTM A193 B7 studs",
+    "ASTM A307 bolts", "SAE fasteners", "UNC threaded rod",
+    "structural bolts A325", "mil-spec fasteners", "inch series fasteners",
+    "domestic fasteners made in USA",
+]
+
+# Các bang công nghiệp Mỹ — biến thể địa lý để quét chi tiết theo bang
+US_STATES = [
+    "Texas", "California", "Ohio", "Illinois", "Michigan", "Pennsylvania",
+    "Indiana", "Wisconsin", "New York", "North Carolina", "Georgia",
+    "Tennessee", "Alabama", "South Carolina", "Kentucky", "Missouri",
+    "Minnesota", "New Jersey", "Florida", "Connecticut", "Massachusetts",
+    "Washington state", "Oregon", "Arizona", "Colorado", "Iowa", "Kansas",
+    "Oklahoma", "Louisiana", "Virginia",
+]
+
 REGIONS = {
     # region_label : (danh sách từ khoá địa lý, mã vùng ddgs)
-    "USA": (["USA", "United States"], "us-en"),
+    # Chế độ chạy liên tục bốc NGẪU NHIÊN 1 từ khoá địa lý trong danh sách
+    # -> với USA sẽ quét chi tiết theo từng bang.
+    "USA": (["USA", "United States"] + US_STATES, "us-en"),
     # # --- Tây Âu ---
     # "Germany": (["Germany"], "de-de"),
     # "UK": (["UK", "United Kingdom"], "uk-en"),
@@ -102,6 +122,9 @@ REGIONS = {
     # "Greece": (["Greece"], "gr-el"),
     # "Turkey": (["Turkey"], "tr-tr"),
 }
+
+# Từ khoá sản phẩm riêng theo vùng (bổ sung vào pool khi bốc truy vấn)
+REGION_PRODUCTS = {"USA": US_PRODUCTS}
 
 MASTER_CSV = "fastener_companies_master.csv"
 RESULTS_PER_QUERY = 15
@@ -289,30 +312,49 @@ def qualify_dataframe(df, region_col="region"):
 # ---------------------------------------------------------------------------
 
 
-def build_queries(products=None, roles=None, regions=None):
-    """Bộ truy vấn đầy đủ (tích Descartes) cho chế độ quét 1 lần."""
-    products = products or PRODUCTS
+def build_queries(products=None, roles=None, regions=None, deep_geo=False):
+    """Bộ truy vấn đầy đủ (tích Descartes) cho chế độ quét 1 lần.
+
+    deep_geo=False: mỗi vùng chỉ dùng từ khoá địa lý đầu tiên ("USA").
+    deep_geo=True : dùng MỌI từ khoá địa lý của vùng (với USA là từng bang)
+                    và cộng thêm REGION_PRODUCTS của vùng đó -> quét sâu.
+    """
+    base_products = products or PRODUCTS
     roles = roles or ROLES
     regions = regions or REGIONS
-    return [(f"{p} {r} {geo[0]} company", label, code)
-            for label, (geo, code) in regions.items()
-            for p in products for r in roles]
+    out = []
+    for label, (geo_terms, code) in regions.items():
+        geos = geo_terms if deep_geo else geo_terms[:1]
+        prods = base_products
+        if deep_geo and products is None:
+            prods = base_products + REGION_PRODUCTS.get(label, [])
+        for geo in geos:
+            for p in prods:
+                for r in roles:
+                    out.append((f"{p} {r} {geo} company", label, code))
+    # khử trùng lặp theo nội dung truy vấn, giữ thứ tự
+    return list({q[0]: q for q in out}.values())
 
 
 def build_cycle_queries(n_queries=60, seed=None, regions=None):
-    """Bộ truy vấn NGẪU NHIÊN cho 1 vòng của chế độ chạy liên tục."""
+    """Bộ truy vấn NGẪU NHIÊN cho 1 vòng của chế độ chạy liên tục.
+
+    Bốc ngẫu nhiên cả từ khoá địa lý trong vùng (với USA = từng bang) và
+    sản phẩm đặc thù vùng (REGION_PRODUCTS) -> tự động quét sâu dần.
+    """
     rng = random.Random(seed)
     regions = regions or REGIONS
-    all_products = PRODUCTS + EXTRA_PRODUCTS
     region_items = list(regions.items())
     queries = {}
     attempts = 0
     # sinh cho đủ n_queries truy vấn DUY NHẤT (tối đa 20*n lần thử)
     while len(queries) < n_queries and attempts < n_queries * 20:
         attempts += 1
-        label, (geo, code) = rng.choice(region_items)
-        q = " ".join(x for x in [rng.choice(all_products), rng.choice(ROLES),
-                                 geo[0], rng.choice(EXTRA_MODIFIERS)] if x)
+        label, (geo_terms, code) = rng.choice(region_items)
+        pool = PRODUCTS + EXTRA_PRODUCTS + REGION_PRODUCTS.get(label, [])
+        q = " ".join(x for x in [rng.choice(pool), rng.choice(ROLES),
+                                 rng.choice(geo_terms),
+                                 rng.choice(EXTRA_MODIFIERS)] if x)
         queries.setdefault(q, (q, label, code))
     return list(queries.values())
 
@@ -659,9 +701,9 @@ def _load_master(path=MASTER_CSV):
 
 def run(products=None, roles=None, regions=None,
         results_per_query=RESULTS_PER_QUERY,
-        out_csv="fastener_companies.csv"):
-    """Quét 1 lần toàn bộ tổ hợp truy vấn."""
-    queries = build_queries(products, roles, regions)
+        out_csv="fastener_companies.csv", deep_geo=False):
+    """Quét 1 lần toàn bộ tổ hợp truy vấn (deep_geo=True: quét theo bang)."""
+    queries = build_queries(products, roles, regions, deep_geo=deep_geo)
     print(f"Tổng số truy vấn: {len(queries)}")
     df, report = search_companies(queries,
                                   results_per_query=results_per_query)
@@ -730,6 +772,10 @@ def main(argv=None):
                              "(cột 'website'); tự resume nếu chạy lại")
     parser.add_argument("--requalify", metavar="FILE.CSV", default=None,
                         help="Chấm điểm qualification lại cho file CSV cũ")
+    parser.add_argument("--deep", action="store_true",
+                        help="Quét SÂU: dùng mọi từ khoá địa lý của vùng "
+                             "(với USA là từng bang) + từ khoá sản phẩm "
+                             "đặc thù vùng (ASTM/SAE/UNC...)")
     args = parser.parse_args(argv)
 
     if args.emails:
@@ -746,7 +792,7 @@ def main(argv=None):
         run_forever(interval_minutes=args.loop,
                     queries_per_cycle=args.queries, max_cycles=args.cycles)
     else:
-        run()
+        run(deep_geo=args.deep)
 
 
 if __name__ == "__main__":

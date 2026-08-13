@@ -30,7 +30,8 @@ Chạy các cell từ trên xuống. File CSV + Excel tự tải về.
 
 ```bash
 pip install -r requirements.txt
-python fastener_finder.py                  # quét 1 lần (~870 truy vấn, 29 nước)
+python fastener_finder.py                  # quét 1 lần (1 truy vấn/nước/sản phẩm)
+python fastener_finder.py --deep           # quét SÂU: từng bang Mỹ + ASTM/SAE/UNC
 python fastener_finder.py --loop 30        # chạy LIÊN TỤC, nghỉ 30'/vòng
 python fastener_finder.py --emails FILE.csv    # quét email (tự resume)
 python fastener_finder.py --requalify FILE.csv # chấm điểm lại file cũ
@@ -51,6 +52,22 @@ python fastener_finder.py --requalify FILE.csv # chấm điểm lại file cũ
 | `emails_external` | Email khác domain (cẩn thận khi dùng) |
 | `email_status` | found / not_found / timeout / blocked / http_4xx / error |
 | `email_found_on` | Các trang đã tìm thấy email |
+
+## Quét sâu theo địa phương (`--deep`)
+
+Mỗi vùng trong `REGIONS` có **danh sách** từ khoá địa lý. Chế độ thường chỉ
+dùng từ khoá đầu (`"USA"`); `--deep` dùng **tất cả** — với Mỹ là **30 bang
+công nghiệp** (Texas, Ohio, Michigan, Illinois...) — và cộng thêm từ khoá
+sản phẩm đặc thù vùng từ `REGION_PRODUCTS` (Mỹ: `grade 8 bolts`,
+`ASTM A193 B7 studs`, `A325 structural bolts`, `UNC threaded rod`,
+`mil-spec fasteners`, `domestic fasteners made in USA`...).
+
+Chế độ **chạy liên tục tự bốc ngẫu nhiên cả bang và từ khoá đặc thù**, nên
+không cần cờ `--deep` — cứ để chạy lâu là tự đào sâu dần.
+
+Muốn thêm bang / từ khoá: sửa `US_STATES` và `US_PRODUCTS` trong core.
+Muốn quét sâu nước khác, thêm từ khoá vùng vào `REGIONS`, ví dụ
+`"Germany": (["Germany", "Bavaria", "NRW", "Baden-Württemberg"], "de-de")`.
 
 ## Chế độ chạy liên tục
 
