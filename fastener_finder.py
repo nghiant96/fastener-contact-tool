@@ -68,39 +68,39 @@ EXTRA_MODIFIERS = ["", "company", "factory", "stockist", "ISO 9001", "OEM"]
 REGIONS = {
     # region_label : (danh sách từ khoá địa lý, mã vùng ddgs)
     "USA": (["USA", "United States"], "us-en"),
-    # --- Tây Âu ---
-    "Germany": (["Germany"], "de-de"),
-    "UK": (["UK", "United Kingdom"], "uk-en"),
-    "France": (["France"], "fr-fr"),
-    "Italy": (["Italy"], "it-it"),
-    "Spain": (["Spain"], "es-es"),
-    "Netherlands": (["Netherlands"], "nl-nl"),
-    "Belgium": (["Belgium"], "be-nl"),
-    "Austria": (["Austria"], "at-de"),
-    "Switzerland": (["Switzerland"], "ch-de"),
-    "Ireland": (["Ireland"], "ie-en"),
-    "Portugal": (["Portugal"], "pt-pt"),
-    "Luxembourg": (["Luxembourg"], "wt-wt"),
-    # --- Bắc Âu ---
-    "Sweden": (["Sweden"], "se-sv"),
-    "Denmark": (["Denmark"], "dk-da"),
-    "Finland": (["Finland"], "fi-fi"),
-    "Norway": (["Norway"], "no-no"),
-    # --- Trung & Đông Âu ---
-    "Poland": (["Poland"], "pl-pl"),
-    "Czech": (["Czech Republic"], "cz-cs"),
-    "Slovakia": (["Slovakia"], "sk-sk"),
-    "Hungary": (["Hungary"], "hu-hu"),
-    "Romania": (["Romania"], "ro-ro"),
-    "Bulgaria": (["Bulgaria"], "bg-bg"),
-    "Slovenia": (["Slovenia"], "sl-sl"),
-    "Croatia": (["Croatia"], "hr-hr"),
-    "Estonia": (["Estonia"], "ee-et"),
-    "Latvia": (["Latvia"], "lv-lv"),
-    "Lithuania": (["Lithuania"], "lt-lt"),
-    # --- Nam Âu khác ---
-    "Greece": (["Greece"], "gr-el"),
-    "Turkey": (["Turkey"], "tr-tr"),
+    # # --- Tây Âu ---
+    # "Germany": (["Germany"], "de-de"),
+    # "UK": (["UK", "United Kingdom"], "uk-en"),
+    # "France": (["France"], "fr-fr"),
+    # "Italy": (["Italy"], "it-it"),
+    # "Spain": (["Spain"], "es-es"),
+    # "Netherlands": (["Netherlands"], "nl-nl"),
+    # "Belgium": (["Belgium"], "be-nl"),
+    # "Austria": (["Austria"], "at-de"),
+    # "Switzerland": (["Switzerland"], "ch-de"),
+    # "Ireland": (["Ireland"], "ie-en"),
+    # "Portugal": (["Portugal"], "pt-pt"),
+    # "Luxembourg": (["Luxembourg"], "wt-wt"),
+    # # --- Bắc Âu ---
+    # "Sweden": (["Sweden"], "se-sv"),
+    # "Denmark": (["Denmark"], "dk-da"),
+    # "Finland": (["Finland"], "fi-fi"),
+    # "Norway": (["Norway"], "no-no"),
+    # # --- Trung & Đông Âu ---
+    # "Poland": (["Poland"], "pl-pl"),
+    # "Czech": (["Czech Republic"], "cz-cs"),
+    # "Slovakia": (["Slovakia"], "sk-sk"),
+    # "Hungary": (["Hungary"], "hu-hu"),
+    # "Romania": (["Romania"], "ro-ro"),
+    # "Bulgaria": (["Bulgaria"], "bg-bg"),
+    # "Slovenia": (["Slovenia"], "sl-sl"),
+    # "Croatia": (["Croatia"], "hr-hr"),
+    # "Estonia": (["Estonia"], "ee-et"),
+    # "Latvia": (["Latvia"], "lv-lv"),
+    # "Lithuania": (["Lithuania"], "lt-lt"),
+    # # --- Nam Âu khác ---
+    # "Greece": (["Greece"], "gr-el"),
+    # "Turkey": (["Turkey"], "tr-tr"),
 }
 
 MASTER_CSV = "fastener_companies_master.csv"
