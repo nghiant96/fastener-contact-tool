@@ -1,0 +1,10 @@
+# môi trường & cache
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# dữ liệu thu thập (chứa email doanh nghiệp — không đưa lên repo)
+*.csv
+*.xlsx
+*.log
