@@ -30,7 +30,7 @@ Chạy các cell từ trên xuống. File CSV + Excel tự tải về.
 
 ```bash
 pip install -r requirements.txt
-python fastener_finder.py                  # quét 1 lần (~300 truy vấn)
+python fastener_finder.py                  # quét 1 lần (~870 truy vấn, 29 nước)
 python fastener_finder.py --loop 30        # chạy LIÊN TỤC, nghỉ 30'/vòng
 python fastener_finder.py --emails FILE.csv    # quét email (tự resume)
 python fastener_finder.py --requalify FILE.csv # chấm điểm lại file cũ

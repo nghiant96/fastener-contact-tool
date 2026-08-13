@@ -68,14 +68,38 @@ EXTRA_MODIFIERS = ["", "company", "factory", "stockist", "ISO 9001", "OEM"]
 REGIONS = {
     # region_label : (danh sách từ khoá địa lý, mã vùng ddgs)
     "USA": (["USA", "United States"], "us-en"),
+    # --- Tây Âu ---
     "Germany": (["Germany"], "de-de"),
     "UK": (["UK", "United Kingdom"], "uk-en"),
     "France": (["France"], "fr-fr"),
     "Italy": (["Italy"], "it-it"),
     "Spain": (["Spain"], "es-es"),
     "Netherlands": (["Netherlands"], "nl-nl"),
-    "Poland": (["Poland"], "pl-pl"),
+    "Belgium": (["Belgium"], "be-nl"),
+    "Austria": (["Austria"], "at-de"),
+    "Switzerland": (["Switzerland"], "ch-de"),
+    "Ireland": (["Ireland"], "ie-en"),
+    "Portugal": (["Portugal"], "pt-pt"),
+    "Luxembourg": (["Luxembourg"], "wt-wt"),
+    # --- Bắc Âu ---
     "Sweden": (["Sweden"], "se-sv"),
+    "Denmark": (["Denmark"], "dk-da"),
+    "Finland": (["Finland"], "fi-fi"),
+    "Norway": (["Norway"], "no-no"),
+    # --- Trung & Đông Âu ---
+    "Poland": (["Poland"], "pl-pl"),
+    "Czech": (["Czech Republic"], "cz-cs"),
+    "Slovakia": (["Slovakia"], "sk-sk"),
+    "Hungary": (["Hungary"], "hu-hu"),
+    "Romania": (["Romania"], "ro-ro"),
+    "Bulgaria": (["Bulgaria"], "bg-bg"),
+    "Slovenia": (["Slovenia"], "sl-sl"),
+    "Croatia": (["Croatia"], "hr-hr"),
+    "Estonia": (["Estonia"], "ee-et"),
+    "Latvia": (["Latvia"], "lv-lv"),
+    "Lithuania": (["Lithuania"], "lt-lt"),
+    # --- Nam Âu khác ---
+    "Greece": (["Greece"], "gr-el"),
     "Turkey": (["Turkey"], "tr-tr"),
 }
 
@@ -163,6 +187,10 @@ CCTLD_COUNTRY = [
     (".at", "Austria"), (".ch", "Switzerland"), (".be", "Belgium"),
     (".cz", "Czech"), (".dk", "Denmark"), (".fi", "Finland"),
     (".no", "Norway"), (".pt", "Portugal"), (".ie", "Ireland"),
+    (".lu", "Luxembourg"), (".sk", "Slovakia"), (".hu", "Hungary"),
+    (".ro", "Romania"), (".bg", "Bulgaria"), (".si", "Slovenia"),
+    (".hr", "Croatia"), (".ee", "Estonia"), (".lv", "Latvia"),
+    (".lt", "Lithuania"), (".gr", "Greece"),
     (".eu", "EU"),
 ]
 

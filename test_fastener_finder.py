@@ -2,6 +2,7 @@
 """Test offline cho core module (không gọi mạng). Chạy: pytest -q"""
 
 import os
+import re
 import tempfile
 
 import pandas as pd
@@ -147,6 +148,29 @@ def test_build_cycle_queries_unique_and_seeded():
     assert q1 == q2
     texts = [q[0] for q in q1]
     assert len(texts) == len(set(texts))
+
+
+def test_regions_wellformed():
+    for label, (geo_terms, ddgs_region) in ff.REGIONS.items():
+        assert geo_terms and all(isinstance(g, str) for g in geo_terms)
+        assert re.fullmatch(r"[a-z]{2}-[a-z]{2,3}", ddgs_region), (
+            f"mã vùng ddgs sai định dạng: {label} -> {ddgs_region}")
+
+
+def test_regions_covered_by_cctld_map():
+    # mọi nước trong REGIONS (trừ Mỹ dùng .com phổ biến) đều nhận diện
+    # được qua ít nhất 1 ccTLD trong bảng
+    countries = {c for _, c in ff.CCTLD_COUNTRY}
+    for label in ff.REGIONS:
+        assert label in countries or label == "USA", (
+            f"{label} chưa có trong CCTLD_COUNTRY")
+
+
+def test_qualify_new_european_country():
+    q = ff.qualify_result("Šroub s.r.o. - screw manufacturer",
+                          "https://sroubcz.cz", "Czech")
+    assert q["verified_country"] == "Czech"
+    assert q["status"] in ("qualified", "review")
 
 
 def test_cli_rejects_nonpositive():
