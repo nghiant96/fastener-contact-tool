@@ -10,17 +10,18 @@ Châu Âu**. Không cần API key (tìm kiếm qua DuckDuckGo).
   qualification / search / email / io-state. Có test offline
   (`test_fastener_finder.py`, chạy `pytest -q`).
 - **`fastener_finder_colab.ipynb`** — adapter mỏng cho Colab: tự tải core
-  mới nhất từ gist, không copy code. Sửa core = Colab tự có bản mới.
+  mới nhất từ repo này (`raw.githubusercontent.com`), không copy code.
+  Sửa core + push = Colab tự có bản mới.
 - CLI cũng chỉ là adapter gọi vào core.
 
 ## 2 cách chạy
 
 ### Cách 1 — Google Colab (không cần cài gì)
 
-Mở link (đã có sẵn trên gist của bạn):
+Mở notebook thẳng từ repo:
 
 ```
-https://colab.research.google.com/gist/nghiant96/60c5cabc1f7f80ec0cbe9398a74b208d/fastener_finder_colab.ipynb
+https://colab.research.google.com/github/nghiant96/fastener-contact-tool/blob/main/fastener_finder_colab.ipynb
 ```
 
 Chạy các cell từ trên xuống. File CSV + Excel tự tải về.
