@@ -353,11 +353,33 @@ US_STATE_ABBR = (
     r"VT|VA|WA|WV|WI|WY"
 )
 
+def _strip_code(html):
+    """Bỏ <script>/<style>/comment trước khi dò tín hiệu địa lý.
+
+    JavaScript là nguồn dương tính giả lớn nhất: `e.timestamp+604800` từng
+    bị nhận là số điện thoại Malaysia (+60...).
+    """
+    html = re.sub(r"(?is)<script\b.*?</script>", " ", html)
+    html = re.sub(r"(?is)<style\b.*?</style>", " ", html)
+    html = re.sub(r"(?s)<!--.*?-->", " ", html)
+    return html
+
+
+def _ph(cc):
+    """Regex số điện thoại quốc tế cho mã vùng cc, chống dương tính giả.
+
+    - Không khớp khi trước dấu '+' là chữ/số (loại `timestamp+604800`)
+    - Phải có dấu phân cách sau mã vùng, HOẶC là dãy 8-12 số liền
+    """
+    return (rf"(?<![\w.>])\+\s?{cc}[\s\-./)]\s?\d[\d\s\-./()]{{5,}}"
+            rf"|(?<![\w.>])\+{cc}\d{{8,12}}(?!\d)")
+
+
 # (regex, trọng số, nhãn bằng chứng) — trọng số cao = bằng chứng mạnh
 GEO_SIGNALS = {
     "China": [
         (r"ICP\s*备|ICP备|[京沪粤浙苏鲁冀津]ICP", 4.0, "giấy phép ICP"),
-        (r"\+\s?86[\s\-)]?\d|\b86-(?:\d{2,3})-\d", 3.5, "điện thoại +86"),
+        (_ph("86"), 3.5, "điện thoại +86"),
         (r"\b(Ningbo|Wenzhou|Handan|Yongnian|Haiyan|Dongguan|Shenzhen|"
          r"Jiaxing|Hebei|Zhejiang|Jiangsu|Guangdong|Shandong|Xingtai|"
          r"Qingdao|Suzhou|Tianjin|Shanghai|Guangzhou)\b", 2.5, "địa danh TQ"),
@@ -365,7 +387,7 @@ GEO_SIGNALS = {
         (r"[一-鿿]{4,}", 2.0, "chữ Hán"),
     ],
     "India": [
-        (r"\+\s?91[\s\-)]?\d{4}", 3.5, "điện thoại +91"),
+        (_ph("91"), 3.5, "điện thoại +91"),
         (r"\bGSTIN?\b|\bIS\s?1367\b|\bIEC\s?\d{10}\b", 3.0, "GST/IS 1367"),
         (r"\b(Mumbai|Ludhiana|Rajkot|Jamnagar|Ahmedabad|Pune|Chennai|"
          r"Kolkata|Maharashtra|Gujarat|Punjab|Tamil Nadu|Haryana|"
@@ -373,17 +395,17 @@ GEO_SIGNALS = {
         (r"₹|\bRs\.?\s?\d", 2.0, "giá rupee"),
     ],
     "Taiwan": [
-        (r"\+\s?886[\s\-)]?\d", 3.5, "điện thoại +886"),
+        (_ph("886"), 3.5, "điện thoại +886"),
         (r"\b(Taichung|Kaohsiung|Tainan|Changhua|Taipei)\b", 2.5,
          "địa danh Đài Loan"),
     ],
-    "Pakistan": [(r"\+\s?92[\s\-)]?\d", 3.5, "điện thoại +92"),
+    "Pakistan": [(_ph("92"), 3.5, "điện thoại +92"),
                  (r"\b(Karachi|Lahore|Sialkot)\b", 2.5, "địa danh Pakistan")],
-    "Vietnam": [(r"\+\s?84[\s\-)]?\d", 3.5, "điện thoại +84")],
-    "Thailand": [(r"\+\s?66[\s\-)]?\d", 3.5, "điện thoại +66")],
-    "Malaysia": [(r"\+\s?60[\s\-)]?\d", 3.5, "điện thoại +60")],
-    "Indonesia": [(r"\+\s?62[\s\-)]?\d", 3.5, "điện thoại +62")],
-    "UAE": [(r"\+\s?971[\s\-)]?\d", 3.5, "điện thoại +971"),
+    "Vietnam": [(_ph("84"), 3.5, "điện thoại +84")],
+    "Thailand": [(_ph("66"), 3.5, "điện thoại +66")],
+    "Malaysia": [(_ph("60"), 3.5, "điện thoại +60")],
+    "Indonesia": [(_ph("62"), 3.5, "điện thoại +62")],
+    "UAE": [(_ph("971"), 3.5, "điện thoại +971"),
             (r"\b(Dubai|Sharjah|Abu Dhabi)\b", 2.5, "địa danh UAE")],
 
     # --- Mỹ & Châu Âu ---
@@ -399,66 +421,66 @@ GEO_SIGNALS = {
         (r"\bInc\.|\bLLC\b|\bCorp\.", 1.0, "loại hình Inc/LLC"),
     ],
     "UK": [
-        (r"\+\s?44[\s\-)]?\d", 3.0, "điện thoại +44"),
+        (_ph("44"), 3.0, "điện thoại +44"),
         (r"\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b", 2.5, "mã bưu chính UK"),
         (r"\bVAT\s?(?:No\.?|number)?\s?GB\s?\d", 2.5, "VAT GB"),
         (r"\bLtd\b|\bLimited\b|\bPLC\b", 1.0, "loại hình Ltd"),
     ],
     "Germany": [
-        (r"\+\s?49[\s\-)]?\d", 3.0, "điện thoại +49"),
+        (_ph("49"), 3.0, "điện thoại +49"),
         (r"\bUSt-IdNr\.?\s?DE\s?\d|\bDE\d{9}\b", 2.5, "VAT DE"),
         (r"\bGmbH\b|\bKG\b|\bAG\b", 1.5, "loại hình GmbH"),
         (r"\bImpressum\b|Stra(?:ß|ss)e\b|\bD-\d{5}\b", 1.5, "Impressum/địa chỉ"),
     ],
-    "France": [(r"\+\s?33[\s\-)]?\d", 3.0, "điện thoại +33"),
+    "France": [(_ph("33"), 3.0, "điện thoại +33"),
                (r"\bSIRET\b|\bTVA\s?FR\d", 2.5, "SIRET/TVA FR"),
                (r"\bSARL\b|\bSAS\b|\bS\.A\.S\b", 1.5, "loại hình SARL/SAS")],
-    "Italy": [(r"\+\s?39[\s\-)]?\d", 3.0, "điện thoại +39"),
+    "Italy": [(_ph("39"), 3.0, "điện thoại +39"),
               (r"\bP\.?\s?IVA\b|\bpartita IVA\b", 2.5, "P.IVA"),
               (r"\bS\.?r\.?l\.?\b|\bS\.?p\.?A\.?\b", 1.5, "loại hình Srl/SpA")],
-    "Spain": [(r"\+\s?34[\s\-)]?\d", 3.0, "điện thoại +34"),
+    "Spain": [(_ph("34"), 3.0, "điện thoại +34"),
               (r"\bC\.?I\.?F\.?\s?[A-Z]\d{8}\b|\bNIF\b", 2.5, "CIF/NIF"),
               (r"\bS\.?L\.?U?\.?\b|\bS\.?A\.?\b", 1.0, "loại hình SL/SA")],
-    "Netherlands": [(r"\+\s?31[\s\-)]?\d", 3.0, "điện thoại +31"),
+    "Netherlands": [(_ph("31"), 3.0, "điện thoại +31"),
                     (r"\bKvK\b|\bBTW\s?NL\d", 2.5, "KvK/BTW"),
                     (r"\bB\.?V\.?\b", 1.5, "loại hình BV")],
-    "Belgium": [(r"\+\s?32[\s\-)]?\d", 3.0, "điện thoại +32"),
+    "Belgium": [(_ph("32"), 3.0, "điện thoại +32"),
                 (r"\bBTW\s?BE\d|\bTVA\s?BE\d", 2.5, "VAT BE")],
-    "Austria": [(r"\+\s?43[\s\-)]?\d", 3.0, "điện thoại +43"),
+    "Austria": [(_ph("43"), 3.0, "điện thoại +43"),
                 (r"\bATU\d{8}\b", 2.5, "VAT ATU")],
-    "Switzerland": [(r"\+\s?41[\s\-)]?\d", 3.0, "điện thoại +41"),
+    "Switzerland": [(_ph("41"), 3.0, "điện thoại +41"),
                     (r"\bCHE-\d{3}\.\d{3}\.\d{3}\b", 2.5, "UID CHE")],
-    "Ireland": [(r"\+\s?353[\s\-)]?\d", 3.0, "điện thoại +353")],
-    "Portugal": [(r"\+\s?351[\s\-)]?\d", 3.0, "điện thoại +351"),
+    "Ireland": [(_ph("353"), 3.0, "điện thoại +353")],
+    "Portugal": [(_ph("351"), 3.0, "điện thoại +351"),
                  (r"\bLda\b|\bNIPC\b", 1.5, "loại hình Lda")],
-    "Luxembourg": [(r"\+\s?352[\s\-)]?\d", 3.0, "điện thoại +352")],
-    "Sweden": [(r"\+\s?46[\s\-)]?\d", 3.0, "điện thoại +46"),
+    "Luxembourg": [(_ph("352"), 3.0, "điện thoại +352")],
+    "Sweden": [(_ph("46"), 3.0, "điện thoại +46"),
                (r"\borganisationsnummer\b|\bSE\d{12}\b", 2.5, "org.nr"),
                (r"\bAB\b(?!\s?C)", 1.0, "loại hình AB")],
-    "Denmark": [(r"\+\s?45[\s\-)]?\d", 3.0, "điện thoại +45"),
+    "Denmark": [(_ph("45"), 3.0, "điện thoại +45"),
                 (r"\bCVR\b|\bA/S\b|\bApS\b", 2.0, "CVR/A-S")],
-    "Finland": [(r"\+\s?358[\s\-)]?\d", 3.0, "điện thoại +358"),
+    "Finland": [(_ph("358"), 3.0, "điện thoại +358"),
                 (r"\bY-tunnus\b|\bOy\b(?:\s|$)", 2.0, "Y-tunnus/Oy")],
-    "Norway": [(r"\+\s?47[\s\-)]?\d", 3.0, "điện thoại +47"),
+    "Norway": [(_ph("47"), 3.0, "điện thoại +47"),
                (r"\borganisasjonsnummer\b|\bAS\b(?=\s|,|\.)", 1.5, "org.nr")],
-    "Poland": [(r"\+\s?48[\s\-)]?\d", 3.0, "điện thoại +48"),
+    "Poland": [(_ph("48"), 3.0, "điện thoại +48"),
                (r"\bNIP\b|\bREGON\b", 2.5, "NIP/REGON"),
                (r"Sp\.?\s?z\s?o\.?o\.?", 1.5, "loại hình Sp. z o.o.")],
-    "Czech": [(r"\+\s?420[\s\-)]?\d", 3.0, "điện thoại +420"),
+    "Czech": [(_ph("420"), 3.0, "điện thoại +420"),
               (r"\bIČO?\b|\bDIČ\b|\bs\.r\.o\.", 2.0, "IČO/s.r.o.")],
-    "Slovakia": [(r"\+\s?421[\s\-)]?\d", 3.0, "điện thoại +421")],
-    "Hungary": [(r"\+\s?36[\s\-)]?\d", 3.0, "điện thoại +36"),
+    "Slovakia": [(_ph("421"), 3.0, "điện thoại +421")],
+    "Hungary": [(_ph("36"), 3.0, "điện thoại +36"),
                 (r"\bKft\.?\b|\badószám\b", 2.0, "Kft/adószám")],
-    "Romania": [(r"\+\s?40[\s\-)]?\d", 3.0, "điện thoại +40"),
+    "Romania": [(_ph("40"), 3.0, "điện thoại +40"),
                 (r"\bS\.?R\.?L\.?\b|\bCUI\b", 1.5, "SRL/CUI")],
-    "Bulgaria": [(r"\+\s?359[\s\-)]?\d", 3.0, "điện thoại +359")],
-    "Slovenia": [(r"\+\s?386[\s\-)]?\d", 3.0, "điện thoại +386")],
-    "Croatia": [(r"\+\s?385[\s\-)]?\d", 3.0, "điện thoại +385")],
-    "Estonia": [(r"\+\s?372[\s\-)]?\d", 3.0, "điện thoại +372")],
-    "Latvia": [(r"\+\s?371[\s\-)]?\d", 3.0, "điện thoại +371")],
-    "Lithuania": [(r"\+\s?370[\s\-)]?\d", 3.0, "điện thoại +370")],
-    "Greece": [(r"\+\s?30[\s\-)]?\d", 3.0, "điện thoại +30")],
-    "Turkey": [(r"\+\s?90[\s\-)]?\d", 3.0, "điện thoại +90"),
+    "Bulgaria": [(_ph("359"), 3.0, "điện thoại +359")],
+    "Slovenia": [(_ph("386"), 3.0, "điện thoại +386")],
+    "Croatia": [(_ph("385"), 3.0, "điện thoại +385")],
+    "Estonia": [(_ph("372"), 3.0, "điện thoại +372")],
+    "Latvia": [(_ph("371"), 3.0, "điện thoại +371")],
+    "Lithuania": [(_ph("370"), 3.0, "điện thoại +370")],
+    "Greece": [(_ph("30"), 3.0, "điện thoại +30")],
+    "Turkey": [(_ph("90"), 3.0, "điện thoại +90"),
                (r"\bA\.?Ş\.?\b|Ltd\.?\s?Şti|\bSanayi\b|\bOSB\b", 2.0,
                 "A.Ş./Sanayi"),
                (r"\b(İstanbul|Istanbul|İzmir|Bursa|Ankara|Konya|Gebze)\b",
@@ -478,6 +500,7 @@ def detect_country_from_html(html):
 
     country = '' nếu không đủ bằng chứng.
     """
+    html = _strip_code(html)
     scores, evidence = {}, {}
     for country, pats in GEO_SIGNALS_COMPILED.items():
         total, found = 0.0, []

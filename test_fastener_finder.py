@@ -297,3 +297,31 @@ def test_resume_rescans_rows_missing_geo(monkeypatch):
     assert calls == ["https://a.com"], "phải quét lại để lấy geo"
     assert res.loc[0, "detected_country"] == "USA"
     assert res.loc[0, "qualification_status"] == "qualified"
+
+
+def test_geo_js_timestamp_not_a_phone():
+    """`e.timestamp+604800` trong JS từng bị nhận là điện thoại +60."""
+    assert ff.detect_country_from_html("if(e.timestamp+604800){}")[0] == ""
+
+
+def test_geo_ignores_script_and_style():
+    html = ("<script>var t=x+8612345678;</script>"
+            "<style>a{content:'+91 22 1234 5678'}</style>"
+            "<p>Ohio 44101, call 800-555-1234</p>")
+    assert ff.detect_country_from_html(html)[0] == "USA"
+
+
+def test_geo_real_phones_still_detected():
+    for text, expected in (
+            ("Tel: +60 12-345 6789 Kuala Lumpur", "Malaysia"),
+            ("Tel: +86 574 8888 8888 Ningbo", "China"),
+            ("Tel. +49 (0)7132 99-0 GmbH Impressum", "Germany"),
+            ("Tél: +33 1 42 68 53 00 SARL TVA FR12345678901", "France")):
+        assert ff.detect_country_from_html(text)[0] == expected, text
+
+
+def test_geo_no_false_positive_on_french_site_text():
+    # trang Pháp có JS lẫn số: không được nhận thành nước châu Á
+    html = ("<script>d=n+60123;</script><p>AHG France, Tél. +33 4 74 00 00 00,"
+            " TVA FR40123456789</p>")
+    assert ff.detect_country_from_html(html)[0] == "France"
