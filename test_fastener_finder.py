@@ -648,3 +648,20 @@ def test_extract_phones_filters_and_orders():
     assert phones[0].startswith("+")            # số quốc tế lên trước
     assert any("800-555-1234" in p for p in phones)
     assert not any(set(re.sub(r"\D", "", p)) <= {"0"} for p in phones)
+
+
+def test_harvest_seeds_reads_repo_seed_files():
+    """Seed CSV (trích 1 lần bằng browser) phải nạp được offline."""
+    df = ff.harvest_seeds(verbose=False)
+    assert not df.empty, "thiếu file trong seeds/"
+    assert {"company_name", "website", "region",
+            "qualification_status"} <= set(df.columns)
+    us = df[df.region == "USA"]
+    assert len(us) > 50
+    assert (us.qualification_status == "qualified").all()
+    assert us.website.str.startswith("https://").all()
+
+
+def test_harvest_seeds_missing_dir_is_empty(tmp_path):
+    assert ff.harvest_seeds(seeds_dir=str(tmp_path / "nope"),
+                            verbose=False).empty

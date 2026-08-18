@@ -1226,6 +1226,56 @@ def parse_directory_html(html, base_url, source_name, country=""):
     return list(rows.values())
 
 
+# --- Seed files: danh bạ chỉ xem được sau khi render JS -------------------
+# Một số danh bạ (MWFA...) là SPA nên `requests` không đọc được. Ta trích một
+# lần bằng trình duyệt rồi lưu thành CSV trong repo `seeds/` — nhờ vậy tool
+# vẫn chạy được ở mọi nơi (CLI, Colab, CI) mà không cần trình duyệt.
+SEEDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seeds")
+
+
+def harvest_seeds(seeds_dir=None, verbose=True):
+    """Nạp mọi file CSV trong seeds/ thành DataFrame công ty."""
+    seeds_dir = seeds_dir or SEEDS_DIR
+    if not os.path.isdir(seeds_dir):
+        return pd.DataFrame()
+    frames = []
+    for fname in sorted(os.listdir(seeds_dir)):
+        if not fname.endswith(".csv"):
+            continue
+        path = os.path.join(seeds_dir, fname)
+        try:
+            seed = pd.read_csv(path).fillna("")
+        except Exception as e:
+            print(f"  !! seed {fname}: {e}")
+            continue
+        rows = []
+        for _, r in seed.iterrows():
+            website = str(r.get("website", "")).strip()
+            domain = _base_domain(_clean_domain(website))
+            if not domain:
+                continue
+            country = str(r.get("country", "")).strip() or \
+                _cctld_country(domain)
+            source = str(r.get("source", "")).strip() or f"seed:{fname}"
+            rows.append({
+                "company_name": str(r.get("company_name", "")).strip(),
+                "website": f"https://{domain}",
+                "region": country or "Europe",
+                "qualification_status": ("qualified" if country in
+                                         TARGET_COUNTRIES else "review"),
+                "confidence_score": 0.95 if country else 0.60,
+                "verified_country": country if country in TARGET_COUNTRIES
+                                    else "",
+                "rejection_reasons": "" if country else "geo_unverified",
+                "found_by_query": source,
+                "source": source,
+            })
+        if verbose:
+            print(f"  seed {fname:24} -> {len(rows):4} công ty")
+        frames.append(pd.DataFrame(rows))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def harvest_directory(cfg, verbose=True):
     """Tải 1 danh bạ và trả về DataFrame công ty."""
     page, reason = _fetch(cfg["url"])
@@ -1251,6 +1301,9 @@ def harvest_directories(configs=None, out_csv="fastener_companies_directory.csv"
     if verbose:
         print(f"Thu hoạch {len(configs)} danh bạ hội ngành:")
     frames = [harvest_directory(c, verbose=verbose) for c in configs]
+    seeds = harvest_seeds(verbose=verbose)
+    if not seeds.empty:
+        frames.append(seeds)
     frames = [f for f in frames if not f.empty]
     if not frames:
         print("Không lấy được công ty nào từ danh bạ.")
