@@ -34,6 +34,7 @@ python fastener_finder.py                  # quét 1 lần (1 truy vấn/nước
 python fastener_finder.py --deep           # quét SÂU: từng bang Mỹ + ASTM/SAE/UNC
 python fastener_finder.py --loop 30        # chạy LIÊN TỤC, nghỉ 30'/vòng
 python fastener_finder.py --directories        # lấy từ DANH BẠ HỘI NGÀNH
+python fastener_finder.py --registry-uk        # công ty Anh từ Companies House
 python fastener_finder.py --directories --merge-into fastener_companies_master.csv
 python fastener_finder.py --emails FILE.csv    # quét email + xác minh nước
 python fastener_finder.py --requalify FILE.csv # chấm điểm lại file cũ
@@ -57,7 +58,12 @@ python fastener_finder.py --requalify FILE.csv # chấm điểm lại file cũ
 | `emails_external` | Email khác domain (cẩn thận khi dùng) |
 | `email_status` | found / not_found / timeout / blocked / http_4xx / error |
 | `email_found_on` | Các trang đã tìm thấy email |
-| `source` | Nguồn dữ liệu: `directory:NFDA` / trống nếu từ search engine |
+| `registry_country` | **Quốc gia ĐĂNG KÝ chính thức** (VIES/GLEIF) — bằng chứng mạnh nhất |
+| `registry_source` | Nguồn xác minh, vd `VIES VAT DE811907980` |
+| `registry_name` | Tên pháp lý theo đăng ký |
+| `vat_ids` | Mã số thuế tìm thấy trên website |
+| `source` | Nguồn dữ liệu: `directory:NFDA`, `registry:companies-house`, trống = search engine |
+| `enrich_version` | Phiên bản bước enrich (dòng cũ hơn sẽ tự quét lại) |
 
 ## Quét sâu theo địa phương (`--deep`)
 
@@ -110,6 +116,44 @@ Thêm danh bạ mới chỉ cần 1 dòng trong `DIRECTORIES` (core), gồm `nam
 `url`, `country`. Parser xử lý được cả 2 kiểu bố cục: tên nằm trong anchor
 (kiểu NFDA) và tên nằm **trước** anchor kèm `(Quốc gia)` (kiểu EFDA).
 
+## 🏛️ Xác minh bằng ĐĂNG KÝ CHÍNH THỨC (mạnh nhất)
+
+Bằng chứng mạnh nhất không phải suy đoán mà là **đăng ký nhà nước**. Bước
+`--emails` tự làm việc này, miễn phí và **không cần API key**:
+
+| Nguồn | Vai trò | Cần key? |
+|-------|---------|----------|
+| **VIES** (hệ thống VAT của EU) | Trích mã số thuế trên website → tra ra **quốc gia đăng ký** + tên pháp lý | Không |
+| **GLEIF** (mã LEI toàn cầu) | Tra tên công ty → quốc gia trụ sở pháp lý | Không |
+| **UK Companies House** | **Khám phá** công ty Anh theo mã ngành SIC 25940 (sản xuất fasteners) | Có (miễn phí) |
+
+Cách hoạt động: tool trích mã số thuế từ trang contact/impressum (nhận dạng
+26 định dạng VAT của EU: `DE`, `NL...B01`, `ATU`, `P.IVA`, `NIP`...), rồi gọi
+VIES. Một mã VAT `DE` hợp lệ nghĩa là công ty **đăng ký ở Đức** — không còn
+gì để tranh luận. Kết quả vào 3 cột: `registry_country`, `registry_source`,
+`registry_name`.
+
+**Thứ tự ưu tiên khi xác định quốc gia:**
+
+```
+registry_country (VAT/VIES, GLEIF)   ← mạnh nhất, đăng ký nhà nước
+  > detected_country (nội dung trang: điện thoại, địa chỉ, mã số thuế)
+    > verified_country (đuôi tên miền .de/.co.uk)
+```
+
+Companies House còn dùng để **khám phá công ty mới** (không chỉ xác minh):
+lọc theo mã ngành SIC ra toàn bộ công ty Anh đang hoạt động trong ngành
+fasteners, kèm địa chỉ đăng ký. Cần key miễn phí:
+
+```bash
+# lấy key tại https://developer.company-information.service.gov.uk
+export COMPANIES_HOUSE_KEY=xxx
+python fastener_finder.py --registry-uk --merge-into fastener_companies_master.csv
+```
+
+Các công ty từ Companies House chưa có website (registry không lưu), nên để
+`review` kèm lý do `no_website_yet` — dùng tên công ty tìm website sau.
+
 ## 🔎 Đọc dữ liệu công ty tự khai (schema.org)
 
 Trước khi dùng heuristic, tool đọc **quốc gia do chính công ty khai báo** trong
@@ -155,7 +199,7 @@ lệnh là chỉ quét những website chưa xong (checkpoint mỗi 50 website).
 
 ```bash
 pip install pytest
-pytest -q          # 53 test offline, không gọi mạng
+pytest -q          # 62 test offline, không gọi mạng
 ```
 
 ## Lưu ý
