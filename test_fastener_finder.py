@@ -588,3 +588,63 @@ def test_enrich_version_triggers_rescan(monkeypatch):
     assert calls == ["https://a.com"], "bản cũ phải được quét lại"
     assert res.loc[0, "enrich_version"] == ff.ENRICH_VERSION
     assert res.loc[0, "registry_country"] == "Germany"
+
+
+# ------------------------------------------- profile: vai trò / sản phẩm
+
+def test_detect_roles_multi_label():
+    html = ("We manufacture anchor bolts in our own factory and are an "
+            "authorized distributor of imported washers.")
+    roles = ff.detect_roles(html)
+    assert "manufacturer" in roles and "distributor" in roles
+
+
+def test_detect_roles_multilingual():
+    assert "manufacturer" in ff.detect_roles("Schraubenhersteller GmbH")
+    assert "manufacturer" in ff.detect_roles("fabricant de visserie")
+    assert "distributor" in ff.detect_roles("groothandel bevestigingsmateriaal")
+
+
+def test_detect_products_needs_repetition():
+    """Nhắc 1 lần trong menu không tính; phải xuất hiện >=2 lần."""
+    assert "washers" not in ff.detect_products("<a>washer</a> welcome")
+    assert "washers" in ff.detect_products("washers in stock, washer sizes")
+
+
+def test_detect_products_targets_user_needs():
+    html = ("Threaded rod DIN 975, threaded bar stock. Stud bolts ASTM A193, "
+            "studs. Flat washers and spring washers.")
+    prods = ff.detect_products(html)
+    for want in ("threaded rod", "studs", "washers"):
+        assert want in prods, want
+
+
+def test_structured_company_name_from_jsonld():
+    html = ('<script type="application/ld+json">{"@type":"LocalBusiness",'
+            '"name":"Portland Bolt & Manufacturing"}</script>')
+    assert ff.structured_company_name(html) == "Portland Bolt & Manufacturing"
+
+
+def test_structured_company_name_og_site_name_fallback():
+    html = '<meta property="og:site_name" content="Atlantic Fasteners">'
+    assert ff.structured_company_name(html) == "Atlantic Fasteners"
+
+
+def test_best_company_name_prefers_registry_then_site():
+    # tên cắt từ tiêu đề SEO -> thay bằng tên website tự khai
+    junky = "Threaded Rod Bunnings, Stainless Steel Threaded Rod Manufacturer"
+    assert ff._best_company_name(junky, "Ananka Group") == "Ananka Group"
+    # tên đăng ký chính thức thắng tất cả
+    assert ff._best_company_name(junky, "Ananka", "ANANKA GROUP LTD") == (
+        "Ananka Group Ltd")
+    # tên danh bạ vốn đã sạch -> giữ nguyên
+    assert ff._best_company_name("Atlantic Fasteners", "Home") == (
+        "Atlantic Fasteners")
+
+
+def test_extract_phones_filters_and_orders():
+    html = "Tel 800-555-1234 or +1 503 555 0000. Fake 000-000-0000. ZIP 97203"
+    phones = ff.extract_phones(html)
+    assert phones[0].startswith("+")            # số quốc tế lên trước
+    assert any("800-555-1234" in p for p in phones)
+    assert not any(set(re.sub(r"\D", "", p)) <= {"0"} for p in phones)

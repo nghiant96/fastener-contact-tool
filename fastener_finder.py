@@ -14,6 +14,7 @@ Kiến trúc: 1 file core duy nhất, chia 5 module:
   [2c] registry    — xác minh qua VAT/VIES, GLEIF, UK Companies House
   [3b] directories — thu hoạch danh bạ hội ngành (nguồn sạch nhất)
   [4] email        — quét email trên website (có provenance & retry)
+  [4b] profile     — vai trò (sản xuất/phân phối/nhập khẩu), sản phẩm, SĐT
   [5] io/state     — ghi file atomic, checkpoint, báo cáo
 CLI và Google Colab đều chỉ là adapter mỏng gọi vào file này.
 
@@ -1409,7 +1410,8 @@ def scrape_site(website):
     page, reason = _fetch(website)
     if page is None:
         return {"emails": [], "status": reason, "country": "",
-                "geo_score": 0.0, "geo_evidence": [], "vat_ids": []}
+                "geo_score": 0.0, "geo_evidence": [], "vat_ids": [],
+                "site_name": "", "roles": [], "products": [], "phones": []}
     html, final_url = page
     html_all.append(html)
 
@@ -1430,8 +1432,8 @@ def scrape_site(website):
     ranked = sorted(((e, c, s) for e, (c, s) in found.items()),
                     key=lambda x: (order[x[1]], x[0]))[:MAX_EMAILS_PER_SITE]
 
-    country, geo_score, evidence = detect_country_from_html(
-        "\n".join(html_all))
+    all_html = "\n".join(html_all)
+    country, geo_score, evidence = detect_country_from_html(all_html)
     # Email .cn/.in cũng là bằng chứng địa lý mạnh
     if not country:
         for e, _c, _s in ranked:
@@ -1447,13 +1449,41 @@ def scrape_site(website):
             "country": country, "geo_score": geo_score,
             "geo_evidence": evidence,
             # mã số thuế để tra ĐĂNG KÝ CHÍNH THỨC (không gọi mạng ở đây)
-            "vat_ids": extract_vat_ids("\n".join(html_all))}
+            "vat_ids": extract_vat_ids(all_html),
+            # công ty LÀ GÌ / BÁN GÌ / tên tự khai / điện thoại
+            "site_name": structured_company_name(html),
+            "roles": detect_roles(all_html),
+            "products": detect_products(all_html),
+            "phones": extract_phones(all_html, country)}
 
 
 def scrape_emails_for_site(website):
     """Tương thích ngược: chỉ trả phần email của scrape_site()."""
     r = scrape_site(website)
     return {"emails": r["emails"], "status": r["status"]}
+
+
+# Tên cắt từ tiêu đề trang thường lẫn từ khoá SEO -> coi là "rác"
+JUNKY_NAME = re.compile(
+    r"(manufactur|supplier|distributor|wholesal|exporter|,|\bfor sale\b|"
+    r"\bbest\b|\bcheap\b|\bin (usa|india|china)\b)", re.I)
+
+
+def _best_company_name(current, site_name, registry_name=""):
+    """Chọn tên đáng tin nhất: đăng ký > website tự khai > tên hiện có.
+
+    Chỉ thay tên hiện có khi nó trông như cắt từ tiêu đề SEO (quá dài hoặc
+    chứa từ khoá sản phẩm) — tên từ danh bạ hội ngành vốn đã sạch.
+    """
+    current = str(current or "").strip()
+    registry_name = str(registry_name or "").strip()
+    site_name = str(site_name or "").strip()
+    if registry_name and registry_name.lower() not in ("nan",):
+        return registry_name.title() if registry_name.isupper() else registry_name
+    junky = (not current or len(current) > 55 or JUNKY_NAME.search(current))
+    if junky and site_name:
+        return site_name
+    return current or site_name
 
 
 def apply_geo_status(df):
@@ -1495,12 +1525,13 @@ def apply_geo_status(df):
 
 # Tăng số này mỗi khi bước enrich lấy thêm dữ liệu mới (vd thêm vat_ids):
 # dòng nào có enrich_version cũ hơn sẽ tự được quét lại.
-ENRICH_VERSION = 2
+ENRICH_VERSION = 3
 
 ENRICH_COLS = ("emails", "emails_external", "email_status",
                "email_found_on", "detected_country", "geo_confidence",
                "geo_evidence", "vat_ids", "registry_country",
-               "registry_source", "registry_name", "enrich_version")
+               "registry_source", "registry_name", "company_name_clean",
+               "company_role", "products", "phones", "enrich_version")
 
 
 def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True,
@@ -1523,7 +1554,8 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True,
     # geo_confidence là cột SỐ (NaN = chưa quét); còn lại là chuỗi
     text_cols = [c for c in ENRICH_COLS
                  if c not in ("geo_confidence", "enrich_version")] + [
-        "qualification_status", "rejection_reasons", "verified_country"]
+        "qualification_status", "rejection_reasons", "verified_country",
+        "company_name"]
     for col in text_cols:
         if col not in df.columns:
             df[col] = ""
@@ -1583,6 +1615,14 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True,
                                                             []))
         df.loc[mask, "vat_ids"] = "; ".join(
             f"{cc}{num}" for cc, num in result.get("vat_ids", []))
+        df.loc[mask, "company_role"] = "; ".join(result.get("roles", []))
+        df.loc[mask, "products"] = "; ".join(result.get("products", []))
+        df.loc[mask, "phones"] = "; ".join(result.get("phones", []))
+        site_name = result.get("site_name", "")
+        for idx in df.index[mask]:
+            df.at[idx, "company_name_clean"] = _best_company_name(
+                df.at[idx, "company_name"], site_name,
+                df.at[idx, "registry_name"])
         df.loc[mask, "enrich_version"] = ENRICH_VERSION
         # cập nhật lại status theo bằng chứng địa lý
         for idx in df.index[mask]:
@@ -1646,6 +1686,15 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True,
           f"email_status: {df['email_status'].value_counts().to_dict()}")
     print(f">> Quốc gia phát hiện: "
           f"{df['detected_country'].replace('', '(không rõ)').value_counts().to_dict()}")
+    roles = df["company_role"].astype(str).replace("nan", "")
+    from collections import Counter
+    role_count = Counter(r for row in roles for r in row.split("; ") if r)
+    print(f">> Vai trò: {dict(role_count)}")
+    prods = df["products"].astype(str).replace("nan", "")
+    prod_count = Counter(p for row in prods for p in row.split("; ") if p)
+    print(f">> Sản phẩm: {dict(prod_count)}")
+    print(f">> Có số điện thoại: "
+          f"{(df['phones'].astype(str).replace('nan', '') != '').sum()}")
     reg = df["registry_country"].astype(str).replace("nan", "")
     print(f">> Xác minh qua đăng ký chính thức: {(reg != '').sum()} công ty "
           f"{reg[reg != ''].value_counts().to_dict()}")
@@ -1656,6 +1705,149 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True,
 
 # tương thích ngược với notebook/script cũ
 add_emails_to_csv = enrich_csv
+
+
+# ---------------------------------------------------------------------------
+# [4b] PROFILE — công ty này LÀ GÌ và BÁN GÌ (đọc từ HTML đã tải, 0 request)
+# ---------------------------------------------------------------------------
+
+# Vai trò: một công ty có thể vừa sản xuất vừa phân phối -> đa nhãn
+ROLE_SIGNALS = {
+    "manufacturer": [
+        r"we manufactur", r"our (own )?(factory|manufacturing|plant|mill)",
+        r"manufacturer of", r"manufacturers of", r"we produce",
+        r"in[- ]house manufactur", r"cold form(ing|ed)", r"cold head(ing|ed)",
+        r"we are a manufactur", r"custom manufactur", r"thread rolling",
+        r"hersteller", r"herstellung", r"fabricant", r"fabrication de",
+        r"produttore", r"produzione", r"fabricante", r"producent",
+        r"tillverkare", r"üretici", r"produsent",
+    ],
+    "distributor": [
+        r"distributor of", r"distributors of", r"authori[sz]ed distributor",
+        r"we distribute", r"master distributor", r"stocking distributor",
+        r"wholesal", r"grossist", r"groothandel", r"distributeur",
+        r"distributore", r"distribuidor", r"dystrybutor", r"händler",
+        r"vertrieb", r"toptan",
+    ],
+    "importer": [
+        r"importer of", r"importers of", r"we import", r"import(eur|ador|atore)",
+        r"importeur", r"ithalat",
+    ],
+    "stockist": [
+        r"stockist", r"from stock", r"ex[- ]stock", r"large stock",
+        r"stock(ed|ing) (items|products|range)", r"lagerhaltung",
+        r"ab lager", r"en stock",
+    ],
+}
+ROLE_COMPILED = {role: [re.compile(p, re.I) for p in pats]
+                 for role, pats in ROLE_SIGNALS.items()}
+
+# Nhóm sản phẩm — đa ngôn ngữ, bám đúng nhu cầu: threaded rod, studs, washers
+PRODUCT_SIGNALS = {
+    "threaded rod": [
+        r"threaded rod", r"threaded bar", r"all[- ]?thread", r"thread(ed)? stud",
+        r"gewindestange", r"tige filet", r"barra filettat", r"barra roscad",
+        r"pr[ęe]t gwintowany", r"g[äa]ngst[åa]ng", r"DIN\s?975", r"DIN\s?976",
+    ],
+    "studs": [r"stud bolt", r"\bstuds\b", r"double[- ]end stud",
+              r"stiftschraube", r"\bgoujon", r"\btirante", r"B7 stud",
+              r"ASTM\s?A193"],
+    "washers": [r"\bwasher", r"\bscheibe", r"\brondelle", r"\brondell",
+                r"arandela", r"podk[łl]adk", r"\bbricka"],
+    "screws": [r"\bscrew", r"schraube", r"\bvis\b", r"visserie", r"\bvit[ei]\b",
+               r"tornillo", r"[śs]rub", r"\bskruv", r"\bvida\b"],
+    "bolts": [r"\bbolt", r"\bbolzen", r"\bboulon", r"\bbullone", r"\bperno",
+              r"\bcivata"],
+    "nuts": [r"\bnuts?\b", r"\bmutter", r"\b[ée]crou", r"\bdad[oi]\b",
+             r"tuerca", r"nakr[ęe]tk"],
+    "rivets": [r"\brivet", r"\bniete", r"rivetto", r"remache", r"\bnit\b"],
+    "anchors": [r"anchor bolt", r"\bd[üu]bel", r"cheville", r"anchor(ing)? "
+                r"(system|product)"],
+}
+PRODUCT_COMPILED = {name: [re.compile(p, re.I) for p in pats]
+                    for name, pats in PRODUCT_SIGNALS.items()}
+
+PHONE_RE = re.compile(
+    r"(?<![\w.>])(\+\d{1,3}[\s\-./()]{0,2}(?:\d[\s\-./()]{0,2}){6,14}\d"
+    r"|\(?\b\d{3}\)?[\s\-.]\d{3}[\s\-.]\d{4}\b)")
+
+
+def _match_labels(text, compiled, min_hits=1):
+    """Trả về các nhãn khớp, sắp theo số lần khớp giảm dần."""
+    scored = []
+    for label, pats in compiled.items():
+        hits = sum(len(p.findall(text)) for p in pats)
+        if hits >= min_hits:
+            scored.append((hits, label))
+    scored.sort(reverse=True)
+    return [label for _, label in scored]
+
+
+def detect_roles(html):
+    """Công ty LÀ GÌ: manufacturer / distributor / importer / stockist."""
+    return _match_labels(_strip_code(html), ROLE_COMPILED)
+
+
+def detect_products(html):
+    """Công ty BÁN GÌ: threaded rod / studs / washers / screws / bolts..."""
+    # cần nhắc >=2 lần để tránh nhắc qua trong menu/footer
+    return _match_labels(_strip_code(html), PRODUCT_COMPILED, min_hits=2)
+
+
+def structured_company_name(html):
+    """Tên công ty do chính website khai báo (sạch hơn cắt tiêu đề trang)."""
+    import json as _json
+
+    for m in re.finditer(
+            r'(?is)<script[^>]+application/ld\+json[^>]*>(.*?)</script>',
+            html):
+        try:
+            data = _json.loads(m.group(1).strip())
+        except Exception:
+            continue
+        stack = [data]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                types = node.get("@type", "")
+                types = types if isinstance(types, list) else [types]
+                if any(str(t) in ("Organization", "LocalBusiness",
+                                  "Corporation", "Store", "Manufacturer")
+                       for t in types):
+                    name = node.get("name")
+                    if isinstance(name, str) and 2 < len(name.strip()) < 100:
+                        return name.strip()
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+
+    m = re.search(
+        r'property=["\']og:site_name["\'][^>]*content=["\']([^"\']{2,90})',
+        html, re.I)
+    if m:
+        import html as _html
+        return _html.unescape(m.group(1)).strip()
+    return ""
+
+
+def extract_phones(html, country=""):
+    """Số điện thoại trên trang; ưu tiên số quốc tế của đúng nước."""
+    text = _strip_code(html)
+    seen, out = set(), []
+    for m in PHONE_RE.finditer(text):
+        raw = re.sub(r"\s+", " ", m.group(1)).strip(" -.")
+        digits = re.sub(r"\D", "", raw)
+        if not (7 <= len(digits) <= 15):
+            continue
+        if len(set(digits)) <= 2:           # 000-000-0000 / 111 111 1111
+            continue
+        if digits in seen:
+            continue
+        seen.add(digits)
+        out.append(raw)
+    # số bắt đầu bằng + (có mã quốc gia) lên trước
+    out.sort(key=lambda s: (not s.startswith("+"),))
+    return out[:3]
 
 
 # ---------------------------------------------------------------------------
