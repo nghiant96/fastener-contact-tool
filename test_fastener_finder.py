@@ -269,3 +269,31 @@ def test_cctld_still_qualifies_directly():
     q = ff.qualify_result("Schrauben GmbH Hersteller",
                           "https://schrauben-x.de", "Germany")
     assert q["status"] == "qualified"
+
+
+def test_resume_rescans_rows_missing_geo(monkeypatch):
+    """File từ bản cũ (chỉ có email, chưa có geo) phải được quét lại."""
+    calls = []
+
+    def fake_scrape(website):
+        calls.append(website)
+        return {"emails": [("a@x.com", "same_domain", website)],
+                "status": "found", "country": "USA", "geo_score": 6.0,
+                "geo_evidence": ["tên bang"]}
+
+    monkeypatch.setattr(ff, "scrape_site", fake_scrape)
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "in.csv")
+        out = os.path.join(d, "in_with_emails.csv")
+        pd.DataFrame({"website": ["https://a.com"],
+                      "qualification_status": ["review"]}).to_csv(
+                          src, index=False)
+        # file output kiểu CŨ: có email nhưng KHÔNG có cột geo
+        pd.DataFrame({"website": ["https://a.com"], "emails": ["old@a.com"],
+                      "emails_external": [""], "email_status": ["found"],
+                      "email_found_on": ["https://a.com"]}).to_csv(
+                          out, index=False)
+        res = ff.enrich_csv(src, out_path=out, workers=1)
+    assert calls == ["https://a.com"], "phải quét lại để lấy geo"
+    assert res.loc[0, "detected_country"] == "USA"
+    assert res.loc[0, "qualification_status"] == "qualified"

@@ -115,7 +115,7 @@ lệnh là chỉ quét những website chưa xong (checkpoint mỗi 50 website).
 
 ```bash
 pip install pytest
-pytest -q          # 18 test offline, không gọi mạng
+pytest -q          # 33 test offline, không gọi mạng
 ```
 
 ## Lưu ý

@@ -844,15 +844,18 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
         raise SystemExit(f"File {csv_path} không có cột 'website'")
     out_path = out_path or csv_path.replace(".csv", "_with_emails.csv")
 
-    for col in ENRICH_COLS:
+    # geo_confidence là cột SỐ (NaN = chưa quét); còn lại là chuỗi
+    text_cols = [c for c in ENRICH_COLS if c != "geo_confidence"] + [
+        "qualification_status", "rejection_reasons", "verified_country"]
+    for col in text_cols:
         if col not in df.columns:
             df[col] = ""
-    for col in ("qualification_status", "rejection_reasons",
-                "verified_country"):
-        if col not in df.columns:
-            df[col] = ""
-    df = df.fillna({c: "" for c in list(ENRICH_COLS) + [
-        "qualification_status", "rejection_reasons", "verified_country"]})
+        df[col] = df[col].astype(object)
+    if "geo_confidence" not in df.columns:
+        df["geo_confidence"] = pd.NA
+    df["geo_confidence"] = pd.to_numeric(df["geo_confidence"],
+                                         errors="coerce")
+    df = df.fillna({c: "" for c in text_cols})
 
     # resume: nạp kết quả cũ nếu có
     if resume and os.path.exists(out_path):
@@ -861,11 +864,23 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
             keep = [c for c in ENRICH_COLS if c in old.columns]
             done_map = old.set_index("website")[keep].to_dict("index")
             for col in keep:
-                df[col] = df.apply(
-                    lambda r: done_map.get(r["website"], {}).get(col, "")
-                    or r[col], axis=1)
+                if col == "geo_confidence":
+                    df[col] = df.apply(
+                        lambda r: pd.to_numeric(
+                            done_map.get(r["website"], {}).get(col),
+                            errors="coerce")
+                        if r["website"] in done_map else r[col], axis=1)
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                else:
+                    df[col] = df.apply(
+                        lambda r: done_map.get(r["website"], {}).get(col, "")
+                        or r[col], axis=1)
 
-    todo = df[df["email_status"] == ""]["website"].tolist()
+    # "Đã xong" = có kết quả email VÀ đã qua bước xác minh địa lý.
+    # (file từ bản cũ chỉ có email -> vẫn được quét lại để xác minh nước)
+    done_mask = (df["email_status"].astype(str) != "") & \
+                df["geo_confidence"].notna()
+    todo = df.loc[~done_mask, "website"].tolist()
     print(f"Quét email + xác minh quốc gia: {len(todo)} website "
           f"({len(df) - len(todo)} đã có từ lần trước), "
           f"{workers} luồng song song...")
