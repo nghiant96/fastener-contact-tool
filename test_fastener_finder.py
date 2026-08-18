@@ -504,3 +504,87 @@ def test_apply_geo_status_fixes_resumed_rows():
     assert out.loc[1, "verified_country"] == "USA"
     # không có bằng chứng -> giữ nguyên
     assert out.loc[2, "qualification_status"] == "qualified"
+
+
+# ------------------------------------------- registry (mục 2)
+
+def test_extract_vat_ids_multiple_countries():
+    html = ("Impressum USt-IdNr. DE 811907980 — BTW NL810462783B01 — "
+            "P.IVA IT12345678901")
+    got = dict(ff.extract_vat_ids(html))
+    assert got["DE"] == "811907980"
+    assert got["NL"] == "810462783B01"
+    assert got["IT"] == "12345678901"
+
+
+def test_extract_vat_ignores_script_block():
+    html = "<script>var x='DE123456789';</script><p>bolts</p>"
+    assert ff.extract_vat_ids(html) == []
+
+
+def test_norm_name_strips_legal_forms():
+    assert ff._norm_name("Bufab AB") == "bufab"
+    assert ff._norm_name("Marcopol Sp. z o.o.") == "marcopol"
+    assert ff._norm_name("AFC Industries, Inc.") == "afc industries"
+
+
+def test_registry_country_prefers_vies(monkeypatch):
+    monkeypatch.setattr(ff, "verify_vat_vies", lambda cc, num: {
+        "valid": True, "country": "Germany", "name": "SCHRAUBEN GMBH",
+        "status": "ok"})
+    country, source, name = ff.registry_country_for_site(
+        [("DE", "811907980")], "Schrauben GmbH")
+    assert country == "Germany"
+    assert "VIES" in source and name == "SCHRAUBEN GMBH"
+
+
+def test_registry_falls_back_to_gleif(monkeypatch):
+    monkeypatch.setattr(ff, "verify_vat_vies", lambda cc, num: {
+        "valid": False, "country": "", "name": "", "status": "invalid"})
+    monkeypatch.setattr(ff, "verify_name_gleif",
+                        lambda name: ("Sweden", "Bufab Lann AB"))
+    country, source, _ = ff.registry_country_for_site([("SE", "1")], "Bufab")
+    assert country == "Sweden" and source == "GLEIF LEI"
+
+
+def test_registry_country_beats_content_heuristic():
+    """Đăng ký chính thức phải thắng suy đoán từ nội dung trang."""
+    df = pd.DataFrame({
+        "website": ["https://a.com"],
+        "detected_country": ["USA"],          # trang khoe địa chỉ Mỹ
+        "registry_country": ["China"],        # nhưng đăng ký ở TQ
+        "qualification_status": ["qualified"],
+        "rejection_reasons": [""], "verified_country": [""],
+    })
+    out = ff.apply_geo_status(df)
+    assert out.loc[0, "qualification_status"] == "rejected"
+
+
+def test_discover_uk_without_key_returns_empty(monkeypatch):
+    monkeypatch.delenv("COMPANIES_HOUSE_KEY", raising=False)
+    assert ff.discover_uk_companies(api_key="").empty
+
+
+def test_enrich_version_triggers_rescan(monkeypatch):
+    """Dòng do bản CŨ tạo (chưa có vat_ids) phải được quét lại."""
+    calls = []
+    monkeypatch.setattr(ff, "scrape_site", lambda w: calls.append(w) or {
+        "emails": [], "status": "not_found", "country": "USA",
+        "geo_score": 3.0, "geo_evidence": ["tên bang"],
+        "vat_ids": [("DE", "811907980")]})
+    monkeypatch.setattr(ff, "registry_country_for_site",
+                        lambda v, n, use_gleif=True: ("Germany", "VIES", ""))
+    with tempfile.TemporaryDirectory() as d:
+        src_csv, out = os.path.join(d, "i.csv"), os.path.join(d, "o.csv")
+        pd.DataFrame({"website": ["https://a.com"],
+                      "company_name": ["A"]}).to_csv(src_csv, index=False)
+        # output kiểu bản cũ: đủ email+geo nhưng KHÔNG có enrich_version
+        pd.DataFrame({"website": ["https://a.com"], "emails": [""],
+                      "emails_external": [""], "email_status": ["not_found"],
+                      "email_found_on": [""], "detected_country": ["USA"],
+                      "geo_confidence": [3.0], "geo_evidence": [""]}
+                     ).to_csv(out, index=False)
+        res = ff.enrich_csv(src_csv, out_path=out, workers=1)
+    assert calls == ["https://a.com"], "bản cũ phải được quét lại"
+    assert res.loc[0, "enrich_version"] == ff.ENRICH_VERSION
+    assert res.loc[0, "registry_country"] == "Germany"

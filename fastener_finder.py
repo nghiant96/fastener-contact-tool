@@ -11,6 +11,7 @@ Kiến trúc: 1 file core duy nhất, chia 5 module:
   [2] qualification— chấm điểm & phân loại từng kết quả tìm kiếm
   [3] search       — sinh truy vấn + gọi DuckDuckGo
   [2b] geo verify  — xác minh QUỐC GIA (schema.org + heuristic nội dung)
+  [2c] registry    — xác minh qua VAT/VIES, GLEIF, UK Companies House
   [3b] directories — thu hoạch danh bạ hội ngành (nguồn sạch nhất)
   [4] email        — quét email trên website (có provenance & retry)
   [5] io/state     — ghi file atomic, checkpoint, báo cáo
@@ -691,6 +692,261 @@ def restatus_by_geo(current_status, detected_country, geo_score):
 
 
 # ---------------------------------------------------------------------------
+# [2c] REGISTRY VERIFICATION — xác minh bằng ĐĂNG KÝ CHÍNH THỨC
+#      Mạnh hơn mọi heuristic: mã số thuế VAT do nhà nước cấp, tra qua
+#      VIES (EU, miễn phí, không cần key) trả về quốc gia đăng ký + tên
+#      pháp lý. GLEIF (mã LEI) và UK Companies House bổ sung.
+# ---------------------------------------------------------------------------
+
+# Định dạng mã số thuế VAT của EU (có tiền tố quốc gia).
+# UK không còn trong VIES sau Brexit -> dùng Companies House thay thế.
+VAT_PATTERNS = {
+    "DE": r"DE\s?(\d{9})",
+    "NL": r"NL\s?(\d{9}\s?B\s?\d{2})",
+    "FR": r"FR\s?([A-Z0-9]{2}\s?\d{9})",
+    "IT": r"IT\s?(\d{11})",
+    "ES": r"ES\s?([A-Z]\d{7}[A-Z0-9])",
+    "BE": r"BE\s?(0?\d{9})",
+    "AT": r"ATU\s?(\d{8})",
+    "PL": r"PL\s?(\d{10})",
+    "SE": r"SE\s?(\d{12})",
+    "DK": r"DK\s?(\d{8})",
+    "FI": r"FI\s?(\d{8})",
+    "IE": r"IE\s?(\d{7}[A-Z]{1,2})",
+    "PT": r"PT\s?(\d{9})",
+    "CZ": r"CZ\s?(\d{8,10})",
+    "SK": r"SK\s?(\d{10})",
+    "HU": r"HU\s?(\d{8})",
+    "RO": r"RO\s?(\d{6,10})",
+    "BG": r"BG\s?(\d{9,10})",
+    "SI": r"SI\s?(\d{8})",
+    "HR": r"HR\s?(\d{11})",
+    "EE": r"EE\s?(\d{9})",
+    "LV": r"LV\s?(\d{11})",
+    "LT": r"LT\s?(\d{9}|\d{12})",
+    "LU": r"LU\s?(\d{8})",
+    "EL": r"(?:EL|GR)\s?(\d{9})",
+}
+VAT_COMPILED = {cc: re.compile(p, re.I) for cc, p in VAT_PATTERNS.items()}
+
+VIES_URL = ("https://ec.europa.eu/taxation_customs/vies/rest-api/ms/"
+            "{cc}/vat/{num}")
+GLEIF_URL = "https://api.gleif.org/api/v1/lei-records"
+REGISTRY_MIN_INTERVAL = 0.6      # giây giữa 2 lần gọi (tôn trọng rate limit)
+_registry_cache = {}
+_registry_last_call = [0.0]
+
+
+def extract_vat_ids(html):
+    """Trích mã số thuế VAT (EU) từ HTML. Trả về [(country_code, number)]."""
+    text = _strip_code(html)
+    found = []
+    for cc, pat in VAT_COMPILED.items():
+        for m in pat.finditer(text):
+            num = re.sub(r"\s+", "", m.group(1)).upper()
+            if (cc, num) not in found:
+                found.append((cc, num))
+    return found[:5]
+
+
+def _throttle():
+    import time as _t
+    wait = REGISTRY_MIN_INTERVAL - (_t.monotonic() - _registry_last_call[0])
+    if wait > 0:
+        _t.sleep(wait)
+    _registry_last_call[0] = _t.monotonic()
+
+
+def verify_vat_vies(country_code, number, timeout=25):
+    """Tra mã số thuế qua VIES. Trả về dict:
+
+    valid / country / name / status ('ok' | 'invalid' | 'unavailable')
+    """
+    import requests
+
+    key = ("vies", country_code, number)
+    if key in _registry_cache:
+        return _registry_cache[key]
+
+    result = {"valid": False, "country": "", "name": "",
+              "status": "unavailable"}
+    try:
+        _throttle()
+        r = requests.get(
+            VIES_URL.format(cc=country_code, num=number),
+            headers={"Accept": "application/json",
+                     "User-Agent": HTTP_HEADERS["User-Agent"]},
+            timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("isValid"):
+                name = (data.get("name") or "").strip()
+                result = {
+                    "valid": True,
+                    "country": ISO2_COUNTRY.get(country_code.upper(), ""),
+                    "name": "" if name in ("---", "") else name,
+                    "status": "ok"}
+            else:
+                result["status"] = "invalid"
+    except Exception:
+        pass
+    _registry_cache[key] = result
+    return result
+
+
+def _norm_name(name):
+    """Chuẩn hoá tên để so khớp: bỏ loại hình DN, dấu câu, khoảng trắng."""
+    n = re.sub(r"[^\w\s]", " ", (name or "").lower())
+    n = re.sub(r"\b(gmbh|ag|kg|ohg|bv|nv|sa|sas|sarl|srl|spa|ltd|limited|"
+               r"plc|inc|llc|corp|corporation|company|co|ab|as|oy|aps|"
+               r"sp|z|o|zoo|kft|sro|doo|lda|group|holding|international)\b",
+               " ", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+
+def verify_name_gleif(company_name, timeout=25):
+    """Tra tên công ty trong GLEIF (mã LEI). Trả về (country, legal_name).
+
+    Chỉ nhận khi tên khớp đủ chặt để tránh nhận nhầm công ty khác.
+    """
+    import requests
+
+    key = ("gleif", (company_name or "").lower())
+    if key in _registry_cache:
+        return _registry_cache[key]
+
+    out = ("", "")
+    target = _norm_name(company_name)
+    if len(target) >= 4:
+        try:
+            _throttle()
+            r = requests.get(
+                GLEIF_URL,
+                params={"filter[entity.legalName]": company_name,
+                        "page[size]": 5},
+                headers={"Accept": "application/vnd.api+json",
+                         "User-Agent": HTTP_HEADERS["User-Agent"]},
+                timeout=timeout)
+            if r.status_code == 200:
+                for rec in r.json().get("data", []):
+                    entity = rec.get("attributes", {}).get("entity", {})
+                    legal = (entity.get("legalName") or {}).get("name", "")
+                    country = ISO2_COUNTRY.get(
+                        (entity.get("legalAddress") or {}).get("country", ""),
+                        "")
+                    if not country:
+                        continue
+                    got = _norm_name(legal)
+                    if got == target or got.startswith(target) or \
+                            target.startswith(got):
+                        out = (country, legal)
+                        break
+        except Exception:
+            pass
+    _registry_cache[key] = out
+    return out
+
+
+def registry_country_for_site(vat_ids, company_name="", use_gleif=True):
+    """Xác minh quốc gia bằng đăng ký chính thức.
+
+    Trả về (country, source_label, official_name).
+    """
+    for cc, num in vat_ids:
+        res = verify_vat_vies(cc, num)
+        if res["valid"] and res["country"]:
+            return (res["country"], f"VIES VAT {cc}{num}", res["name"])
+    if use_gleif and company_name:
+        country, legal = verify_name_gleif(company_name)
+        if country:
+            return country, "GLEIF LEI", legal
+    return "", "", ""
+
+
+# --- UK Companies House: KHÁM PHÁ công ty mới theo mã ngành SIC -------------
+# SIC 25940 = "Manufacture of fasteners and screw machine products"
+# Cần API key miễn phí: https://developer.company-information.service.gov.uk
+# -> đặt biến môi trường COMPANIES_HOUSE_KEY
+CH_API = "https://api.company-information.service.gov.uk/advanced-search/companies"
+CH_SIC_FASTENERS = ["25940", "25930", "46740"]  # fasteners, wire, hardware WS
+
+
+def discover_uk_companies(sic_codes=None, size=100, max_pages=5,
+                          api_key=None, verbose=True):
+    """Lấy công ty Anh theo mã ngành SIC từ Companies House (cần API key).
+
+    Đây là DỮ LIỆU ĐĂNG KÝ CHÍNH THỨC: mọi công ty đều thật và ở UK.
+    """
+    import requests
+
+    api_key = api_key or os.environ.get("COMPANIES_HOUSE_KEY", "")
+    if not api_key:
+        print("  (!) Chưa có COMPANIES_HOUSE_KEY -> bỏ qua Companies House.\n"
+              "      Lấy key miễn phí tại "
+              "https://developer.company-information.service.gov.uk\n"
+              "      rồi: export COMPANIES_HOUSE_KEY=xxx")
+        return pd.DataFrame()
+
+    sic_codes = sic_codes or CH_SIC_FASTENERS
+    rows = {}
+    for sic in sic_codes:
+        for page in range(max_pages):
+            try:
+                _throttle()
+                r = requests.get(
+                    CH_API, auth=(api_key, ""),
+                    params={"sic_codes": sic, "size": size,
+                            "start_index": page * size,
+                            "company_status": "active"},
+                    headers={"Accept": "application/json"}, timeout=30)
+            except Exception as e:
+                print(f"  !! Companies House lỗi: {e}")
+                break
+            if r.status_code == 401:
+                print("  !! API key Companies House không hợp lệ")
+                return pd.DataFrame()
+            if r.status_code != 200:
+                break
+            items = r.json().get("items", [])
+            if not items:
+                break
+            for it in items:
+                name = (it.get("company_name") or "").strip()
+                number = it.get("company_number") or ""
+                if not name or number in rows:
+                    continue
+                addr = it.get("registered_office_address") or {}
+                rows[number] = {
+                    "company_name": name.title(),
+                    "website": "",
+                    "region": "UK",
+                    "qualification_status": "review",
+                    "confidence_score": 0.90,
+                    "verified_country": "UK",
+                    "registry_country": "UK",
+                    "registry_source": f"Companies House SIC {sic}",
+                    "registry_name": name,
+                    "rejection_reasons": "no_website_yet",
+                    "found_by_query": f"registry:companies-house:{sic}",
+                    "source": "registry:companies-house",
+                    "company_number": number,
+                    "registered_address": ", ".join(
+                        str(addr.get(k, "")) for k in
+                        ("address_line_1", "locality", "postal_code")
+                        if addr.get(k)),
+                }
+            if verbose:
+                print(f"  SIC {sic}: trang {page + 1} -> tổng {len(rows)}")
+            if len(items) < size:
+                break
+    df = pd.DataFrame(rows.values())
+    if verbose:
+        print(f"  Companies House -> {len(df)} công ty Anh (đăng ký chính "
+              f"thức)")
+    return df
+
+
+# ---------------------------------------------------------------------------
 # [3] SEARCH — sinh truy vấn + gọi DuckDuckGo
 # ---------------------------------------------------------------------------
 
@@ -1153,7 +1409,7 @@ def scrape_site(website):
     page, reason = _fetch(website)
     if page is None:
         return {"emails": [], "status": reason, "country": "",
-                "geo_score": 0.0, "geo_evidence": []}
+                "geo_score": 0.0, "geo_evidence": [], "vat_ids": []}
     html, final_url = page
     html_all.append(html)
 
@@ -1189,7 +1445,9 @@ def scrape_site(website):
 
     return {"emails": ranked, "status": "found" if ranked else "not_found",
             "country": country, "geo_score": geo_score,
-            "geo_evidence": evidence}
+            "geo_evidence": evidence,
+            # mã số thuế để tra ĐĂNG KÝ CHÍNH THỨC (không gọi mạng ở đây)
+            "vat_ids": extract_vat_ids("\n".join(html_all))}
 
 
 def scrape_emails_for_site(website):
@@ -1206,10 +1464,16 @@ def apply_geo_status(df):
     """
     if "detected_country" not in df.columns:
         return df
+    has_registry = "registry_country" in df.columns
     changed = 0
     for idx in df.index:
-        country = str(df.at[idx, "detected_country"] or "")
+        # ĐĂNG KÝ CHÍNH THỨC thắng heuristic nội dung trang
+        country = ""
+        if has_registry:
+            country = str(df.at[idx, "registry_country"] or "")
         if not country:
+            country = str(df.at[idx, "detected_country"] or "")
+        if not country or country == "nan":
             continue
         cur = str(df.at[idx, "qualification_status"] or "review")
         new_status, reason = restatus_by_geo(cur, country, 0.0)
@@ -1229,12 +1493,18 @@ def apply_geo_status(df):
     return df
 
 
+# Tăng số này mỗi khi bước enrich lấy thêm dữ liệu mới (vd thêm vat_ids):
+# dòng nào có enrich_version cũ hơn sẽ tự được quét lại.
+ENRICH_VERSION = 2
+
 ENRICH_COLS = ("emails", "emails_external", "email_status",
                "email_found_on", "detected_country", "geo_confidence",
-               "geo_evidence")
+               "geo_evidence", "vat_ids", "registry_country",
+               "registry_source", "registry_name", "enrich_version")
 
 
-def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
+def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True,
+               verify_registry=True):
     """Đọc CSV (cột `website`), với MỖI website quét 1 lượt để lấy:
       - email (kèm provenance)
       - bằng chứng QUỐC GIA từ nội dung trang -> cập nhật lại
@@ -1251,14 +1521,16 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
     out_path = out_path or csv_path.replace(".csv", "_with_emails.csv")
 
     # geo_confidence là cột SỐ (NaN = chưa quét); còn lại là chuỗi
-    text_cols = [c for c in ENRICH_COLS if c != "geo_confidence"] + [
+    text_cols = [c for c in ENRICH_COLS
+                 if c not in ("geo_confidence", "enrich_version")] + [
         "qualification_status", "rejection_reasons", "verified_country"]
     for col in text_cols:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].astype(object)
-    if "geo_confidence" not in df.columns:
-        df["geo_confidence"] = pd.NA
+    for numcol in ("geo_confidence", "enrich_version"):
+        if numcol not in df.columns:
+            df[numcol] = pd.NA
     df["geo_confidence"] = pd.to_numeric(df["geo_confidence"],
                                          errors="coerce")
     df = df.fillna({c: "" for c in text_cols})
@@ -1284,8 +1556,11 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
 
     # "Đã xong" = có kết quả email VÀ đã qua bước xác minh địa lý.
     # (file từ bản cũ chỉ có email -> vẫn được quét lại để xác minh nước)
+    df["enrich_version"] = pd.to_numeric(df["enrich_version"],
+                                         errors="coerce").fillna(0)
     done_mask = (df["email_status"].astype(str) != "") & \
-                df["geo_confidence"].notna()
+                df["geo_confidence"].notna() & \
+                (df["enrich_version"] >= ENRICH_VERSION)
     todo = df.loc[~done_mask, "website"].tolist()
     print(f"Quét email + xác minh quốc gia: {len(todo)} website "
           f"({len(df) - len(todo)} đã có từ lần trước), "
@@ -1306,6 +1581,9 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
         df.loc[mask, "geo_confidence"] = result.get("geo_score", 0.0)
         df.loc[mask, "geo_evidence"] = "; ".join(result.get("geo_evidence",
                                                             []))
+        df.loc[mask, "vat_ids"] = "; ".join(
+            f"{cc}{num}" for cc, num in result.get("vat_ids", []))
+        df.loc[mask, "enrich_version"] = ENRICH_VERSION
         # cập nhật lại status theo bằng chứng địa lý
         for idx in df.index[mask]:
             cur = df.at[idx, "qualification_status"] or "review"
@@ -1339,6 +1617,28 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
             if done % CHECKPOINT_EVERY == 0:
                 save_tables(df, out_path, xlsx=False, quiet=True)
 
+    # --- Bước tra ĐĂNG KÝ CHÍNH THỨC (tuần tự, tôn trọng rate limit) ---
+    if verify_registry:
+        todo_reg = df[(df["registry_country"].astype(str).isin(["", "nan"]))
+                      & (df["vat_ids"].astype(str) != "")]
+        if len(todo_reg):
+            print(f"\nTra đăng ký chính thức (VIES) cho {len(todo_reg)} "
+                  f"công ty có mã số thuế...")
+        for n, idx in enumerate(todo_reg.index, 1):
+            vat_ids = [(v[:2], v[2:]) for v in
+                       str(df.at[idx, "vat_ids"]).split("; ") if len(v) > 2]
+            country, source, official = registry_country_for_site(
+                vat_ids, str(df.at[idx, "company_name"] or ""),
+                use_gleif=False)
+            if country:
+                df.at[idx, "registry_country"] = country
+                df.at[idx, "registry_source"] = source
+                df.at[idx, "registry_name"] = official
+                print(f"  [{n}/{len(todo_reg)}] "
+                      f"{df.at[idx, 'website']} -> {country} ({source})")
+            if n % CHECKPOINT_EVERY == 0:
+                save_tables(df, out_path, xlsx=False, quiet=True)
+
     df = apply_geo_status(df)
     save_tables(df, out_path)
     n_found = int((df["email_status"] == "found").sum())
@@ -1346,6 +1646,9 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
           f"email_status: {df['email_status'].value_counts().to_dict()}")
     print(f">> Quốc gia phát hiện: "
           f"{df['detected_country'].replace('', '(không rõ)').value_counts().to_dict()}")
+    reg = df["registry_country"].astype(str).replace("nan", "")
+    print(f">> Xác minh qua đăng ký chính thức: {(reg != '').sum()} công ty "
+          f"{reg[reg != ''].value_counts().to_dict()}")
     print(f">> Sau xác minh: "
           f"{df['qualification_status'].value_counts().to_dict()}")
     return df
@@ -1477,6 +1780,10 @@ def main(argv=None):
                              "là dữ liệu sẵn có, không phải suy đoán")
     parser.add_argument("--merge-into", metavar="FILE.CSV", default=None,
                         help="Gộp kết quả --directories vào file tổng này")
+    parser.add_argument("--registry-uk", action="store_true",
+                        help="Lấy công ty Anh từ ĐĂNG KÝ CHÍNH THỨC "
+                             "Companies House theo mã ngành SIC 25940 "
+                             "(cần COMPANIES_HOUSE_KEY)")
     parser.add_argument("--requalify", metavar="FILE.CSV", default=None,
                         help="Chấm điểm qualification lại cho file CSV cũ")
     parser.add_argument("--deep", action="store_true",
@@ -1485,7 +1792,16 @@ def main(argv=None):
                              "đặc thù vùng (ASTM/SAE/UNC...)")
     args = parser.parse_args(argv)
 
-    if args.directories:
+    if args.registry_uk:
+        df = discover_uk_companies()
+        if not df.empty:
+            save_tables(df, "fastener_companies_uk_registry.csv")
+            if args.merge_into:
+                master, known = _load_master(args.merge_into)
+                merged = pd.concat([master, df], ignore_index=True)
+                save_tables(merged, args.merge_into)
+                print(f">> Gộp vào {args.merge_into}: tổng {len(merged)}")
+    elif args.directories:
         harvest_directories(merge_into=args.merge_into)
     elif args.emails:
         if not os.path.exists(args.emails):
