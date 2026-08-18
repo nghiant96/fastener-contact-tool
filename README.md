@@ -33,7 +33,9 @@ pip install -r requirements.txt
 python fastener_finder.py                  # quét 1 lần (1 truy vấn/nước/sản phẩm)
 python fastener_finder.py --deep           # quét SÂU: từng bang Mỹ + ASTM/SAE/UNC
 python fastener_finder.py --loop 30        # chạy LIÊN TỤC, nghỉ 30'/vòng
-python fastener_finder.py --emails FILE.csv    # quét email (tự resume)
+python fastener_finder.py --directories        # lấy từ DANH BẠ HỘI NGÀNH
+python fastener_finder.py --directories --merge-into fastener_companies_master.csv
+python fastener_finder.py --emails FILE.csv    # quét email + xác minh nước
 python fastener_finder.py --requalify FILE.csv # chấm điểm lại file cũ
 ```
 
@@ -55,6 +57,7 @@ python fastener_finder.py --requalify FILE.csv # chấm điểm lại file cũ
 | `emails_external` | Email khác domain (cẩn thận khi dùng) |
 | `email_status` | found / not_found / timeout / blocked / http_4xx / error |
 | `email_found_on` | Các trang đã tìm thấy email |
+| `source` | Nguồn dữ liệu: `directory:NFDA` / trống nếu từ search engine |
 
 ## Quét sâu theo địa phương (`--deep`)
 
@@ -79,6 +82,43 @@ phẩm), **chỉ thêm công ty MỚI** vào `fastener_companies_master.csv` (gh
 atomic — chết giữa chừng không hỏng file). Chạy càng lâu danh sách càng dài;
 Ctrl+C dừng an toàn, chạy lại là tích luỹ tiếp. Cuối mỗi vòng in báo cáo:
 truy vấn ok/lỗi, số ứng viên, số qualified/review/loại/trùng.
+
+## 🏅 Nguồn tốt nhất: danh bạ hội ngành (`--directories`)
+
+Thay vì "tìm bừa rồi đoán quốc gia", cách tối ưu là lấy từ nguồn mà **quốc
+gia là một trường dữ liệu sẵn có**: danh bạ hội viên của hội ngành. Hội viên
+đã được hội kiểm duyệt là doanh nghiệp thật trong ngành, và quốc gia là
+thuộc tính của chính hội (NFDA/Pac-West = hội Mỹ).
+
+| Danh bạ | Phạm vi | Số công ty |
+|---------|---------|-----------|
+| NFDA — National Fastener Distributors Association | Mỹ | ~156 |
+| Pac-West Fastener Association | Mỹ | ~145 |
+| EFDA — European Fastener Distributor Association | Châu Âu | ~22 |
+
+Ưu điểm so với quét search engine:
+
+- **Không cần đoán quốc gia** — hội Mỹ thì hội viên là công ty Mỹ.
+- **Tên công ty sạch** — lấy từ anchor text, không phải cắt tiêu đề trang.
+- **Không cần đoán "đúng ngành"** — tư cách hội viên đã bảo đảm; nhờ vậy
+  giữ được cả công ty tên không chứa chữ "fastener" (vd `gexproservices.com`)
+  mà bộ lọc từ khoá sẽ bỏ sót.
+- Tự lọc hội ngành / triển lãm / tạp chí lẫn trong danh bạ; hội viên là hội
+  quốc gia (tên viết tắt như `FDS`, `NEVIB`) hạ xuống `review` chứ không xoá.
+
+Thêm danh bạ mới chỉ cần 1 dòng trong `DIRECTORIES` (core), gồm `name`,
+`url`, `country`. Parser xử lý được cả 2 kiểu bố cục: tên nằm trong anchor
+(kiểu NFDA) và tên nằm **trước** anchor kèm `(Quốc gia)` (kiểu EFDA).
+
+## 🔎 Đọc dữ liệu công ty tự khai (schema.org)
+
+Trước khi dùng heuristic, tool đọc **quốc gia do chính công ty khai báo** trong
+dữ liệu có cấu trúc: `schema.org PostalAddress.addressCountry` (JSON-LD hoặc
+microdata) — chính xác hơn mọi suy đoán, trọng số cao nhất.
+
+`og:locale` và `priceCurrency` chỉ là **gợi ý yếu**: `og:locale` là *ngôn ngữ*
+chứ không phải quốc gia — `stauff.fr` (công ty Pháp) dùng `en_GB`, nếu tin
+tưởng nó thì sẽ gán sai thành UK.
 
 ## ⚠️ Vì sao phải chạy bước xác minh quốc gia
 
@@ -115,7 +155,7 @@ lệnh là chỉ quét những website chưa xong (checkpoint mỗi 50 website).
 
 ```bash
 pip install pytest
-pytest -q          # 33 test offline, không gọi mạng
+pytest -q          # 53 test offline, không gọi mạng
 ```
 
 ## Lưu ý
