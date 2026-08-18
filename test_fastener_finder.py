@@ -325,3 +325,163 @@ def test_geo_no_false_positive_on_french_site_text():
     html = ("<script>d=n+60123;</script><p>AHG France, Tél. +33 4 74 00 00 00,"
             " TVA FR40123456789</p>")
     assert ff.detect_country_from_html(html)[0] == "France"
+
+
+# --------------------------------------------- structured data (mục 3)
+
+def test_structured_jsonld_addresscountry_iso2():
+    html = ('<script type="application/ld+json">{"@type":"Organization",'
+            '"address":{"@type":"PostalAddress","addressCountry":"DE"}}'
+            '</script>')
+    assert ff.structured_country(html) == ("Germany", "JSON-LD addressCountry",
+                                           ff.STRUCT_STRONG)
+
+
+def test_structured_jsonld_nested_object_and_fullname():
+    html = ('<script type="application/ld+json">'
+            '{"address":{"addressCountry":{"name":"United States"}}}</script>')
+    assert ff.structured_country(html)[0] == "USA"
+
+
+def test_structured_jsonld_in_list():
+    html = ('<script type="application/ld+json">[{"@type":"WebSite"},'
+            '{"@type":"LocalBusiness","address":{"addressCountry":"IT"}}]'
+            '</script>')
+    assert ff.structured_country(html)[0] == "Italy"
+
+
+def test_structured_ignores_broken_json():
+    html = '<script type="application/ld+json">{oops,</script>'
+    assert ff.structured_country(html) == ("", "", 0.0)
+
+
+def test_structured_og_locale_and_currency():
+    assert ff.structured_country(
+        '<meta property="og:locale" content="fr_FR">')[0] == "France"
+    assert ff.structured_country('"priceCurrency": "GBP"')[0] == "UK"
+
+
+def test_structured_beats_weak_heuristics():
+    # trang khai báo CN nhưng nhắc 'USA' trong nội dung -> phải là China
+    html = ('<script type="application/ld+json">'
+            '{"address":{"addressCountry":"CN"}}</script>'
+            '<p>Supplier for USA market, ASTM A193</p>')
+    assert ff.detect_country_from_html(html)[0] == "China"
+
+
+def test_norm_country_variants():
+    assert ff._norm_country("US") == "USA"
+    assert ff._norm_country("deutschland") == "Germany"
+    assert ff._norm_country("Türkiye") == "Turkey"
+    assert ff._norm_country("Nowhere") == ""
+    assert ff._norm_country(None) == ""
+
+
+def test_og_locale_is_language_not_country():
+    """stauff.fr (công ty Pháp) dùng og:locale en_GB -> KHÔNG được thành UK."""
+    html = ('<meta property="og:locale" content="en_GB">'
+            '<p>STAUFF France SARL, Tél. +33 1 23 45 67 89, TVA FR12345678901</p>')
+    assert ff.detect_country_from_html(html)[0] == "France"
+    # một mình og:locale không đủ điểm để xác minh
+    weak = ff.detect_country_from_html('<meta property="og:locale" content="en_GB">')
+    assert weak[0] == ""
+
+
+# ------------------------------------------- directory harvest (mục 1)
+
+NFDA_LIKE = '''
+<ul>
+  <li><a href="https://www.brightonbest.com" target="_blank">Brighton-Best
+      International</a></li>
+  <li><a href="https://afcind.com">AFC Industries, Inc.</a></li>
+  <li><a href="https://fastenershows.com">International Fastener Expo</a></li>
+  <li><a href="https://www.facebook.com/nfda">Facebook</a></li>
+  <li><a href="https://nfda-fastener.org/about">About us</a></li>
+</ul>
+'''
+
+EFDA_LIKE = '''
+<p><strong>Bendkopp Group </strong>(Romania)
+   <a class="more" href="http://www.bendkopp.ro" target="_blank">Website</a>
+   <br /><strong>Etra Oy</strong> (Finland)
+   <a class="more" href="http://www.etra.fi">Website</a>
+   <br /><strong>FDS</strong> (Germany)
+   <a class="more" href="http://www.fds-online.de">Website</a></p>
+'''
+
+
+def test_directory_parse_anchor_text_names():
+    rows = ff.parse_directory_html(NFDA_LIKE, "https://nfda-fastener.org/x",
+                                   "NFDA", country="USA")
+    by_site = {r["website"]: r for r in rows}
+    assert by_site["https://brightonbest.com"]["company_name"] == (
+        "Brighton-Best International")
+    assert by_site["https://afcind.com"]["company_name"] == (
+        "AFC Industries, Inc.")
+    # hội viên hội Mỹ -> qualified, nước lấy từ chính hội
+    assert by_site["https://afcind.com"]["qualification_status"] == "qualified"
+    assert by_site["https://afcind.com"]["verified_country"] == "USA"
+    assert by_site["https://afcind.com"]["source"] == "directory:NFDA"
+
+
+def test_directory_skips_expo_social_and_own_domain():
+    sites = {r["website"] for r in ff.parse_directory_html(
+        NFDA_LIKE, "https://nfda-fastener.org/x", "NFDA", country="USA")}
+    assert "https://fastenershows.com" not in sites   # triển lãm
+    assert "https://facebook.com" not in sites        # mạng xã hội
+    assert "https://nfda-fastener.org" not in sites   # chính trang danh bạ
+
+
+def test_directory_name_and_country_before_generic_anchor():
+    """Kiểu EFDA: tên trong <strong>, nước trong (), anchor chỉ là 'Website'."""
+    rows = ff.parse_directory_html(
+        EFDA_LIKE, "https://efda-fastenerdistributors.org/de/members",
+        "EFDA", country="")
+    by_site = {r["website"]: r for r in rows}
+    assert by_site["https://bendkopp.ro"]["company_name"] == "Bendkopp Group"
+    assert by_site["https://bendkopp.ro"]["region"] == "Romania"
+    assert by_site["https://etra.fi"]["company_name"] == "Etra Oy"
+    assert by_site["https://etra.fi"]["region"] == "Finland"
+
+
+def test_directory_acronym_member_downgraded_to_review():
+    """FDS là hội quốc gia, không phải nhà cung cấp -> chỉ 'review'."""
+    rows = ff.parse_directory_html(
+        EFDA_LIKE, "https://efda-fastenerdistributors.org/de/members",
+        "EFDA", country="")
+    fds = next(r for r in rows if r["website"] == "https://fds-online.de")
+    assert fds["qualification_status"] == "review"
+    assert "possible_association" in fds["rejection_reasons"]
+
+
+def test_directory_name_from_domain_fallback():
+    html = '<a href="https://metfix.com.pl"><img src="logo.png"></a>'
+    rows = ff.parse_directory_html(html, "https://efda.org", "EFDA")
+    assert rows[0]["company_name"] == "Metfix"
+
+
+def test_name_country_window_is_tight():
+    """Nước của dòng TRƯỚC không được gán sai cho công ty dòng sau."""
+    html = ("<strong>Alpha</strong> (Spain) " + "&nbsp; " * 40 +
+            "<strong>Beta</strong> <a href='https://beta-bolts.de'>Website</a>")
+    rows = ff.parse_directory_html(html, "https://efda.org", "EFDA")
+    beta = rows[0]
+    assert beta["company_name"] == "Beta"
+    assert beta["region"] != "Spain"
+
+
+def test_directory_skip_does_not_eat_lookalike_domains():
+    """`x.com` / `bing` / `apple` từng khớp chuỗi con -> loại oan công ty."""
+    html = ('<a href="https://metfix.com.pl">Metfix</a>'
+            '<a href="https://binghamfasteners.com">Bingham Fasteners</a>'
+            '<a href="https://appletonbolt.com">Appleton Bolt</a>'
+            '<a href="https://fixdex.com">Fixdex</a>'
+            '<a href="https://x.com/nfda">X</a>'
+            '<a href="https://bing.com">Bing</a>')
+    sites = {r["website"] for r in ff.parse_directory_html(
+        html, "https://efda.org", "EFDA")}
+    assert "https://metfix.com.pl" in sites
+    assert "https://binghamfasteners.com" in sites
+    assert "https://appletonbolt.com" in sites
+    assert "https://fixdex.com" in sites
+    assert "https://x.com" not in sites and "https://bing.com" not in sites

@@ -10,7 +10,8 @@ Kiến trúc: 1 file core duy nhất, chia 5 module:
   [1] utils        — chuẩn hoá domain/URL
   [2] qualification— chấm điểm & phân loại từng kết quả tìm kiếm
   [3] search       — sinh truy vấn + gọi DuckDuckGo
-  [2b] geo verify  — xác minh QUỐC GIA bằng nội dung website
+  [2b] geo verify  — xác minh QUỐC GIA (schema.org + heuristic nội dung)
+  [3b] directories — thu hoạch danh bạ hội ngành (nguồn sạch nhất)
   [4] email        — quét email trên website (có provenance & retry)
   [5] io/state     — ghi file atomic, checkpoint, báo cáo
 CLI và Google Colab đều chỉ là adapter mỏng gọi vào file này.
@@ -19,6 +20,7 @@ Chạy:
   python fastener_finder.py                    # quét 1 lần
   python fastener_finder.py --loop 30          # chạy liên tục, nghỉ 30'
   python fastener_finder.py --emails FILE.csv  # quét email + XÁC MINH nước
+  python fastener_finder.py --directories          # lấy từ danh bạ hội ngành
   python fastener_finder.py --requalify FILE.csv   # chấm điểm lại file cũ
 
 Cài đặt:
@@ -353,6 +355,142 @@ US_STATE_ABBR = (
     r"VT|VA|WA|WV|WI|WY"
 )
 
+# --- Dữ liệu CÓ CẤU TRÚC: quốc gia do chính công ty khai báo -----------------
+# Chính xác hơn mọi heuristic: schema.org PostalAddress.addressCountry,
+# og:locale, đơn vị tiền tệ. Phải đọc TRƯỚC khi _strip_code() bỏ <script>.
+
+ISO2_COUNTRY = {
+    "US": "USA", "GB": "UK", "UK": "UK", "DE": "Germany", "FR": "France",
+    "IT": "Italy", "ES": "Spain", "NL": "Netherlands", "BE": "Belgium",
+    "AT": "Austria", "CH": "Switzerland", "IE": "Ireland", "PT": "Portugal",
+    "LU": "Luxembourg", "SE": "Sweden", "DK": "Denmark", "FI": "Finland",
+    "NO": "Norway", "PL": "Poland", "CZ": "Czech", "SK": "Slovakia",
+    "HU": "Hungary", "RO": "Romania", "BG": "Bulgaria", "SI": "Slovenia",
+    "HR": "Croatia", "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania",
+    "GR": "Greece", "TR": "Turkey",
+    "CN": "China", "IN": "India", "TW": "Taiwan", "PK": "Pakistan",
+    "VN": "Vietnam", "TH": "Thailand", "MY": "Malaysia", "ID": "Indonesia",
+    "AE": "UAE",
+}
+
+NAME_COUNTRY = {
+    "united states": "USA", "usa": "USA", "u.s.a.": "USA",
+    "united kingdom": "UK", "great britain": "UK", "england": "UK",
+    "deutschland": "Germany", "germany": "Germany",
+    "france": "France", "italia": "Italy", "italy": "Italy",
+    "españa": "Spain", "espana": "Spain", "spain": "Spain",
+    "nederland": "Netherlands", "netherlands": "Netherlands",
+    "holland": "Netherlands", "belgië": "Belgium", "belgique": "Belgium",
+    "belgium": "Belgium", "österreich": "Austria", "austria": "Austria",
+    "schweiz": "Switzerland", "suisse": "Switzerland",
+    "switzerland": "Switzerland", "ireland": "Ireland",
+    "portugal": "Portugal", "luxembourg": "Luxembourg",
+    "sverige": "Sweden", "sweden": "Sweden", "danmark": "Denmark",
+    "denmark": "Denmark", "suomi": "Finland", "finland": "Finland",
+    "norge": "Norway", "norway": "Norway", "polska": "Poland",
+    "poland": "Poland", "česko": "Czech", "czechia": "Czech",
+    "czech republic": "Czech", "slovensko": "Slovakia",
+    "slovakia": "Slovakia", "magyarország": "Hungary",
+    "hungary": "Hungary", "românia": "Romania", "romania": "Romania",
+    "bulgaria": "Bulgaria", "slovenija": "Slovenia", "slovenia": "Slovenia",
+    "hrvatska": "Croatia", "croatia": "Croatia", "eesti": "Estonia",
+    "estonia": "Estonia", "latvija": "Latvia", "latvia": "Latvia",
+    "lietuva": "Lithuania", "lithuania": "Lithuania", "ελλάδα": "Greece",
+    "greece": "Greece", "türkiye": "Turkey", "turkey": "Turkey",
+    "china": "China", "中国": "China", "p.r.c": "China",
+    "india": "India", "भारत": "India", "taiwan": "Taiwan",
+    "pakistan": "Pakistan", "vietnam": "Vietnam", "viet nam": "Vietnam",
+    "thailand": "Thailand", "malaysia": "Malaysia",
+    "indonesia": "Indonesia", "united arab emirates": "UAE",
+}
+
+CURRENCY_COUNTRY = {"USD": "USA", "GBP": "UK", "CNY": "China",
+                    "RMB": "China", "INR": "India", "TRY": "Turkey",
+                    "PLN": "Poland", "SEK": "Sweden", "DKK": "Denmark",
+                    "NOK": "Norway", "CHF": "Switzerland", "CZK": "Czech",
+                    "HUF": "Hungary", "RON": "Romania"}
+
+
+def _norm_country(value):
+    """'US' / 'united states' / 'Deutschland' -> nhãn quốc gia của tool."""
+    if not value or not isinstance(value, str):
+        return ""
+    v = value.strip()
+    if len(v) == 2 and v.upper() in ISO2_COUNTRY:
+        return ISO2_COUNTRY[v.upper()]
+    return NAME_COUNTRY.get(v.lower().strip(". "), "")
+
+
+def _walk_json(node):
+    """Duyệt cây JSON, sinh ra từng (key, value) kể cả trong list lồng nhau."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield k, v
+            yield from _walk_json(v)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _walk_json(item)
+
+
+# Trọng số: địa chỉ khai báo là bằng chứng MẠNH; còn og:locale chỉ là
+# NGÔN NGỮ chứ không phải quốc gia (vd stauff.fr dùng en_GB -> không phải UK),
+# nên chỉ được coi là gợi ý yếu, một mình không đủ xác minh.
+STRUCT_STRONG, STRUCT_WEAK = 4.0, 1.0
+
+
+def structured_country(html):
+    """Đọc quốc gia KHAI BÁO trong dữ liệu có cấu trúc.
+
+    Trả về (country, evidence_label, weight) — ('', '', 0.0) nếu không có.
+    """
+    import json as _json
+
+    # 1) JSON-LD schema.org
+    for m in re.finditer(
+            r'(?is)<script[^>]+application/ld\+json[^>]*>(.*?)</script>',
+            html):
+        raw = m.group(1).strip()
+        try:
+            data = _json.loads(raw)
+        except Exception:
+            continue
+        for key, value in _walk_json(data):
+            if key.lower() != "addresscountry":
+                continue
+            if isinstance(value, dict):
+                value = value.get("name") or value.get("identifier") or ""
+            country = _norm_country(value)
+            if country:
+                return country, "JSON-LD addressCountry", STRUCT_STRONG
+
+    # 2) microdata: itemprop="addressCountry"
+    m = re.search(
+        r'itemprop=["\']addressCountry["\'][^>]*content=["\']([^"\']+)',
+        html, re.I)
+    if m:
+        country = _norm_country(m.group(1))
+        if country:
+            return country, "microdata addressCountry", STRUCT_STRONG
+
+    # 3) og:locale (vd de_DE, en_US)
+    m = re.search(
+        r'property=["\']og:locale["\'][^>]*content=["\']\w{2}[_-](\w{2})',
+        html, re.I)
+    if m:
+        country = _norm_country(m.group(1))
+        if country:
+            return country, "og:locale (ngôn ngữ, gợi ý yếu)", STRUCT_WEAK
+
+    # 4) đơn vị tiền tệ trong dữ liệu sản phẩm
+    m = re.search(r'priceCurrency["\':\s]+([A-Z]{3})', html)
+    if m:
+        country = CURRENCY_COUNTRY.get(m.group(1).upper(), "")
+        if country:
+            return (country, f"priceCurrency {m.group(1).upper()}",
+                    STRUCT_WEAK)
+    return "", "", 0.0
+
+
 def _strip_code(html):
     """Bỏ <script>/<style>/comment trước khi dò tín hiệu địa lý.
 
@@ -500,6 +638,9 @@ def detect_country_from_html(html):
 
     country = '' nếu không đủ bằng chứng.
     """
+    # Bước 1: dữ liệu có cấu trúc (công ty tự khai) — đáng tin nhất.
+    declared, declared_label, declared_weight = structured_country(html)
+
     html = _strip_code(html)
     scores, evidence = {}, {}
     for country, pats in GEO_SIGNALS_COMPILED.items():
@@ -511,6 +652,11 @@ def detect_country_from_html(html):
         if total:
             scores[country] = total
             evidence[country] = found
+    # Khai báo có cấu trúc được cộng điểm rất cao (bằng chứng trực tiếp)
+    if declared:
+        scores[declared] = scores.get(declared, 0.0) + declared_weight
+        evidence.setdefault(declared, []).insert(0, declared_label)
+
     if not scores:
         return "", 0.0, []
 
@@ -670,6 +816,212 @@ def _print_report(report):
           f"ứng viên: {report['candidates']} "
           f"(qualified {report['qualified']}, review {report['review']}, "
           f"loại {report['rejected']}, trùng {report['duplicates']})")
+
+
+# ---------------------------------------------------------------------------
+# [3b] DIRECTORY HARVEST — lấy công ty từ danh bạ HỘI NGÀNH
+#      Đây là nguồn sạch nhất: hội viên đã được hội kiểm duyệt là doanh
+#      nghiệp thật trong ngành, và QUỐC GIA là thuộc tính của chính hội
+#      (NFDA/PacWest = hội Mỹ) chứ không phải thứ phải suy đoán như khi
+#      quét search engine.
+# ---------------------------------------------------------------------------
+
+DIRECTORIES = [
+    {"name": "NFDA",
+     "url": "https://www.nfda-fastener.org/member-list1",
+     "country": "USA",
+     "note": "National Fastener Distributors Association (Mỹ)"},
+    {"name": "PacWest",
+     "url": "https://www.pac-west.org/member-list",
+     "country": "USA",
+     "note": "Pacific-West Fastener Association (Mỹ)"},
+    {"name": "EFDA",
+     "url": "https://www.efda-fastenerdistributors.org/de/members",
+     "country": "",   # hội châu Âu: lấy nước theo ccTLD của từng hội viên
+     "note": "European Fastener Distributor Association (Châu Âu)"},
+]
+
+# Nền tảng quản lý hội viên / CDN — khớp theo CHUỖI CON (tên rất đặc thù,
+# không trùng với tên công ty thật)
+DIRECTORY_SKIP = re.compile(
+    r"(memberclicks|growthzone|azureedge|cloudflare|fontawesome|gstatic|"
+    r"jquery|bootstrapcdn|eventbrite|mailchimp|constantcontact|gravatar|"
+    r"wordpress|googletagmanager|doubleclick)", re.I)
+
+# Các domain phải khớp CHÍNH XÁC. Trước đây dùng chuỗi con nên `x\.com`
+# (chặn Twitter/X) khớp luôn metfix.com.pl / fixdex.com / phoenix.com, và
+# `bing` khớp binghamfasteners.com -> loại oan công ty thật.
+DIRECTORY_SKIP_EXACT = {
+    "x.com", "vimeo.com", "flickr.com", "xing.com", "paypal.com",
+    "google.com", "bing.com", "apple.com", "microsoft.com", "adobe.com",
+    "wp.com", "gmpg.org", "w3.org", "schema.org", "gstatic.com",
+}
+
+
+# Danh bạ có lẫn HỘI NGÀNH, TRIỂN LÃM, tạp chí — không phải nhà cung cấp
+NON_COMPANY = re.compile(
+    r"(association|assoc\.|federation|verband|institute|föreningen|"
+    r"\bexpo\b|exhibition|trade ?show|fastenershows|conference|congress|"
+    r"magazine|journal|\bmedia\b|university|college|chamber of commerce)",
+    re.I)
+
+# Hội viên là hội quốc gia thường có tên viết tắt toàn chữ hoa (FDS, NEVIB,
+# BIAFD...) -> không loại hẳn, chỉ hạ xuống 'review' để người dùng tự duyệt
+ACRONYM_ONLY = re.compile(r"^[A-Z][A-Z&.\- ]{1,7}$")
+
+
+GENERIC_ANCHOR = re.compile(
+    r"(?i)^(website|web ?site|web|visit(\s+(us|website))?|click here|more|"
+    r"link|home ?page|url|www\.?|info|details|read more)\.?$")
+
+
+def _name_country_before_anchor(html, pos):
+    """Nhiều danh bạ đặt tên công ty TRƯỚC link, anchor chỉ ghi 'Website'.
+
+    Vd EFDA: <strong>Bendkopp Group</strong> (Romania) <a ...>Website</a>
+    -> lấy tên trong <strong>/<b> gần nhất và quốc gia trong ngoặc.
+    """
+    import html as _html
+
+    ctx = html[max(0, pos - 400):pos]
+    ctx_country_zone = ctx[-150:]   # nước phải ở NGAY trước link
+    names = re.findall(r"(?is)<(?:strong|b)[^>]*>(.*?)</(?:strong|b)>", ctx)
+    name = ""
+    if names:
+        name = _html.unescape(re.sub(r"<[^>]+>", " ", names[-1]))
+        name = re.sub(r"\s+", " ", name).strip(" -–—|,")
+    country = ""
+    for candidate in reversed(re.findall(r"\(([^)]{3,30})\)",
+                                        ctx_country_zone)):
+        country = _norm_country(candidate.strip())
+        if country:
+            break
+    return name, country
+
+
+def _name_from_domain(domain):
+    """metfix.com.pl -> Metfix (phương án cuối khi không có tên)."""
+    label = domain.split(".")[0].replace("-", " ").replace("_", " ")
+    return label.title()
+
+
+def parse_directory_html(html, base_url, source_name, country=""):
+    """Trích (tên công ty, website) từ HTML một trang danh bạ hội viên.
+
+    Dùng anchor text làm tên công ty — sạch hơn nhiều so với cắt tiêu đề
+    trang từ kết quả tìm kiếm.
+    """
+    import html as _html
+
+    own_domain = _base_domain(_clean_domain(base_url))
+    rows = {}
+    for m in re.finditer(
+            r"<a[^>]+href=[\"'](https?://[^\"']+)[\"'][^>]*>(.*?)</a>",
+            html, re.I | re.S):
+        href, inner = m.group(1), m.group(2)
+        domain = _base_domain(_clean_domain(href))
+        if (not domain or domain == own_domain
+                or domain in DOMAIN_BLOCKLIST
+                or domain in DIRECTORY_SKIP_EXACT
+                or DIRECTORY_SKIP.search(domain)):
+            continue
+
+        name = _html.unescape(re.sub(r"<[^>]+>", " ", inner))
+        name = re.sub(r"\s+", " ", name).strip(" -–—|,")
+        ctx_country = ""
+        # anchor rỗng / chung chung ("Website") -> lấy tên đứng trước link,
+        # hoặc alt của logo, cuối cùng mới suy từ tên miền
+        if not name or len(name) < 3 or GENERIC_ANCHOR.match(name):
+            ctx_name, ctx_country = _name_country_before_anchor(html,
+                                                                m.start())
+            alt = re.search(r'alt=["\']([^"\']{3,80})["\']', inner, re.I)
+            name = ctx_name or (alt.group(1).strip() if alt else "")
+            if not name:
+                name = _name_from_domain(domain)
+        if name.lower().startswith("http"):
+            name = _name_from_domain(domain)
+        if NON_COMPANY.search(name) or NON_COMPANY.search(domain):
+            continue
+        if domain in rows and len(rows[domain]["company_name"]) >= len(name):
+            continue
+
+        verified = country or ctx_country or _cctld_country(domain)
+        is_acronym = bool(ACRONYM_ONLY.match(name))
+        rows[domain] = {
+            "company_name": name[:120],
+            "website": f"https://{domain}",
+            "region": verified or "Europe",
+            # hội viên hội ngành => đúng ngành, đúng vùng (theo hội)
+            "qualification_status": (
+                "qualified" if verified in TARGET_COUNTRIES and not is_acronym
+                else "review"),
+            "confidence_score": (0.95 if verified and not is_acronym
+                                 else 0.60),
+            "verified_country": verified if verified in TARGET_COUNTRIES
+                                else "",
+            "rejection_reasons": "; ".join(
+                x for x in ["" if verified else "geo_unverified",
+                            "possible_association" if is_acronym else ""]
+                if x),
+            "found_by_query": f"directory:{source_name}",
+            "source": f"directory:{source_name}",
+        }
+    return list(rows.values())
+
+
+def harvest_directory(cfg, verbose=True):
+    """Tải 1 danh bạ và trả về DataFrame công ty."""
+    page, reason = _fetch(cfg["url"])
+    if page is None:
+        if verbose:
+            print(f"  !! {cfg['name']}: không tải được ({reason})")
+        return pd.DataFrame()
+    rows = parse_directory_html(page[0], page[1], cfg["name"],
+                               cfg.get("country", ""))
+    if verbose:
+        print(f"  {cfg['name']:10} -> {len(rows):4} công ty "
+              f"({cfg.get('note', '')})")
+    return pd.DataFrame(rows)
+
+
+def harvest_directories(configs=None, out_csv="fastener_companies_directory.csv",
+                        merge_into=None, verbose=True):
+    """Thu hoạch TẤT CẢ danh bạ; tuỳ chọn gộp vào file tổng (khử trùng lặp).
+
+    Trả về DataFrame các công ty lấy từ danh bạ.
+    """
+    configs = configs or DIRECTORIES
+    if verbose:
+        print(f"Thu hoạch {len(configs)} danh bạ hội ngành:")
+    frames = [harvest_directory(c, verbose=verbose) for c in configs]
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        print("Không lấy được công ty nào từ danh bạ.")
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+    df["added_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # khử trùng lặp: giữ dòng có điểm cao nhất cho mỗi domain
+    df = (df.sort_values("confidence_score", ascending=False)
+            .drop_duplicates("website", keep="first")
+            .reset_index(drop=True))
+    if verbose:
+        print(f"\n>> Tổng {len(df)} công ty duy nhất từ danh bạ")
+        print(df["region"].value_counts().to_string())
+
+    if out_csv:
+        save_tables(df, out_csv)
+
+    if merge_into:
+        master, known = _load_master(merge_into)
+        fresh = df[~df["website"].map(
+            lambda u: _base_domain(_clean_domain(u))).isin(known)]
+        merged = pd.concat([master, fresh], ignore_index=True)
+        save_tables(merged, merge_into)
+        print(f">> Gộp vào {merge_into}: thêm {len(fresh)} công ty mới "
+              f"(tổng {len(merged)})")
+        return merged
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -1087,6 +1439,12 @@ def main(argv=None):
                         help="Với mỗi website: quét email VÀ xác minh quốc "
                              "gia từ nội dung trang (loại công ty ngoài "
                              "Mỹ/Châu Âu); tự resume nếu chạy lại")
+    parser.add_argument("--directories", action="store_true",
+                        help="Lấy công ty từ danh bạ HỘI NGÀNH (NFDA, "
+                             "PacWest, EFDA...) — nguồn sạch nhất, quốc gia "
+                             "là dữ liệu sẵn có, không phải suy đoán")
+    parser.add_argument("--merge-into", metavar="FILE.CSV", default=None,
+                        help="Gộp kết quả --directories vào file tổng này")
     parser.add_argument("--requalify", metavar="FILE.CSV", default=None,
                         help="Chấm điểm qualification lại cho file CSV cũ")
     parser.add_argument("--deep", action="store_true",
@@ -1095,7 +1453,9 @@ def main(argv=None):
                              "đặc thù vùng (ASTM/SAE/UNC...)")
     args = parser.parse_args(argv)
 
-    if args.emails:
+    if args.directories:
+        harvest_directories(merge_into=args.merge_into)
+    elif args.emails:
         if not os.path.exists(args.emails):
             raise SystemExit(f"Không thấy file: {args.emails}")
         enrich_csv(args.emails)
