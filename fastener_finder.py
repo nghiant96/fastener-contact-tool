@@ -1198,6 +1198,37 @@ def scrape_emails_for_site(website):
     return {"emails": r["emails"], "status": r["status"]}
 
 
+def apply_geo_status(df):
+    """Áp dụng lại status theo bằng chứng địa lý cho MỌI dòng đã có geo.
+
+    Phải chạy cho cả dòng được resume bỏ qua — nếu không, dòng đã biết là
+    China vẫn giữ 'qualified' từ lần chấm điểm search trước đó.
+    """
+    if "detected_country" not in df.columns:
+        return df
+    changed = 0
+    for idx in df.index:
+        country = str(df.at[idx, "detected_country"] or "")
+        if not country:
+            continue
+        cur = str(df.at[idx, "qualification_status"] or "review")
+        new_status, reason = restatus_by_geo(cur, country, 0.0)
+        if new_status != cur:
+            changed += 1
+        df.at[idx, "qualification_status"] = new_status
+        if country in TARGET_COUNTRIES:
+            df.at[idx, "verified_country"] = country
+        if reason:
+            old_r = str(df.at[idx, "rejection_reasons"] or "")
+            if reason not in old_r:
+                df.at[idx, "rejection_reasons"] = "; ".join(
+                    x for x in [old_r, reason] if x)
+    if changed:
+        print(f"   (cập nhật lại status cho {changed} dòng theo bằng chứng "
+              f"địa lý đã có)")
+    return df
+
+
 ENRICH_COLS = ("emails", "emails_external", "email_status",
                "email_found_on", "detected_country", "geo_confidence",
                "geo_evidence")
@@ -1308,6 +1339,7 @@ def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
             if done % CHECKPOINT_EVERY == 0:
                 save_tables(df, out_path, xlsx=False, quiet=True)
 
+    df = apply_geo_status(df)
     save_tables(df, out_path)
     n_found = int((df["email_status"] == "found").sum())
     print(f"\n>> Có email: {n_found}/{len(df)} | "
@@ -1462,7 +1494,7 @@ def main(argv=None):
     elif args.requalify:
         if not os.path.exists(args.requalify):
             raise SystemExit(f"Không thấy file: {args.requalify}")
-        df = qualify_dataframe(pd.read_csv(args.requalify))
+        df = apply_geo_status(qualify_dataframe(pd.read_csv(args.requalify)))
         save_tables(df, args.requalify)
         print(df["qualification_status"].value_counts().to_string())
     elif args.loop is not None:

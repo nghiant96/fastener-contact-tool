@@ -485,3 +485,22 @@ def test_directory_skip_does_not_eat_lookalike_domains():
     assert "https://appletonbolt.com" in sites
     assert "https://fixdex.com" in sites
     assert "https://x.com" not in sites and "https://bing.com" not in sites
+
+
+def test_apply_geo_status_fixes_resumed_rows():
+    """Dòng đã biết là China nhưng status còn 'qualified' (do resume bỏ qua
+    hoặc do requalify ghi lại) phải bị chuyển thành rejected."""
+    df = pd.DataFrame({
+        "website": ["https://a.com", "https://b.com", "https://c.com"],
+        "detected_country": ["China", "USA", ""],
+        "qualification_status": ["qualified", "review", "qualified"],
+        "rejection_reasons": ["", "", ""],
+        "verified_country": ["", "", ""],
+    })
+    out = ff.apply_geo_status(df)
+    assert out.loc[0, "qualification_status"] == "rejected"
+    assert "geo_outside_target:China" in out.loc[0, "rejection_reasons"]
+    assert out.loc[1, "qualification_status"] == "qualified"
+    assert out.loc[1, "verified_country"] == "USA"
+    # không có bằng chứng -> giữ nguyên
+    assert out.loc[2, "qualification_status"] == "qualified"
