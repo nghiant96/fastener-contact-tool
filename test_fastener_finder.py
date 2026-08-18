@@ -206,3 +206,66 @@ def test_cli_rejects_nonpositive():
         ff.main(["--loop", "0"])
     with pytest.raises(SystemExit):
         ff.main(["--queries", "-5", "--loop", "1"])
+
+
+# ------------------------------------------------------- geo verification
+
+def test_geo_detect_china():
+    html = "Ningbo Zhejiang factory. Tel: +86 574 8888 8888. ICP备12345号"
+    country, score, ev = ff.detect_country_from_html(html)
+    assert country == "China"
+    assert score >= ff.GEO_MIN_SCORE and ev
+
+
+def test_geo_detect_usa():
+    html = ("Portland, OR 97203 — Call 800-555-1234. ASTM A193 bolts. "
+            "Acme Bolt Inc.")
+    country, _, _ = ff.detect_country_from_html(html)
+    assert country == "USA"
+
+
+def test_geo_banned_signal_beats_higher_target_score():
+    # công ty Ấn Độ đăng cả địa chỉ Mỹ + ASTM (điểm USA cao hơn) nhưng có
+    # +91 và địa danh Ấn Độ -> phải nhận là India
+    html = ("Houston, TX 77002 USA. ASTM A193 UNC. Mumbai, Maharashtra. "
+            "Call +91 22 4567 8900")
+    country, _, _ = ff.detect_country_from_html(html)
+    assert country == "India"
+
+
+def test_geo_no_signal_returns_empty():
+    country, score, _ = ff.detect_country_from_html("just some bolts here")
+    assert country == ""
+
+
+def test_restatus_rejects_banned_country():
+    status, reason = ff.restatus_by_geo("qualified", "China", 8.0)
+    assert status == "rejected"
+    assert reason.startswith("geo_outside_target")
+
+
+def test_restatus_promotes_target_country():
+    status, reason = ff.restatus_by_geo("review", "USA", 6.0)
+    assert status == "qualified"
+    assert reason == ""
+
+
+def test_restatus_keeps_review_when_unverified():
+    status, reason = ff.restatus_by_geo("review", "", 0.0)
+    assert status == "review"
+    assert reason == "geo_unverified"
+
+
+def test_dotcom_cannot_be_qualified_without_geo():
+    # đây là lỗi đã gây ra dữ liệu toàn công ty TQ: .com điểm ngành cao
+    # nhưng KHÔNG có bằng chứng quốc gia -> chỉ được 'review'
+    q = ff.qualify_result("Fastener manufacturer supplier USA",
+                          "https://xyzfastener.com", "USA")
+    assert q["status"] == "review"
+    assert "geo_unverified" in q["reasons"]
+
+
+def test_cctld_still_qualifies_directly():
+    q = ff.qualify_result("Schrauben GmbH Hersteller",
+                          "https://schrauben-x.de", "Germany")
+    assert q["status"] == "qualified"

@@ -10,6 +10,7 @@ Kiến trúc: 1 file core duy nhất, chia 5 module:
   [1] utils        — chuẩn hoá domain/URL
   [2] qualification— chấm điểm & phân loại từng kết quả tìm kiếm
   [3] search       — sinh truy vấn + gọi DuckDuckGo
+  [2b] geo verify  — xác minh QUỐC GIA bằng nội dung website
   [4] email        — quét email trên website (có provenance & retry)
   [5] io/state     — ghi file atomic, checkpoint, báo cáo
 CLI và Google Colab đều chỉ là adapter mỏng gọi vào file này.
@@ -17,7 +18,8 @@ CLI và Google Colab đều chỉ là adapter mỏng gọi vào file này.
 Chạy:
   python fastener_finder.py                    # quét 1 lần
   python fastener_finder.py --loop 30          # chạy liên tục, nghỉ 30'
-  python fastener_finder.py --emails FILE.csv  # quét email (resume được)
+  python fastener_finder.py --emails FILE.csv  # quét email + XÁC MINH nước
+  python fastener_finder.py --requalify FILE.csv   # chấm điểm lại file cũ
 
 Cài đặt:
   pip install -r requirements.txt   (ddgs, pandas, openpyxl, requests)
@@ -284,6 +286,14 @@ def qualify_result(title, url, region):
     else:
         status = "rejected"
         reasons.append("low_relevance")
+
+    # QUAN TRỌNG: domain .com/.net không mang bằng chứng quốc gia nào, nên
+    # công ty Trung Quốc/Ấn Độ nhắm từ khoá "USA fastener supplier" trông
+    # giống hệt công ty Mỹ thật. Vì vậy KHÔNG cho 'qualified' khi chưa xác
+    # minh địa lý — phải chạy bước verify (đọc nội dung website) trước.
+    if status == "qualified" and not verified_country:
+        status = "review"
+        reasons.append("geo_unverified")
     return _q(status, score, verified_country, reasons)
 
 
@@ -305,6 +315,210 @@ def qualify_dataframe(df, region_col="region"):
     out["verified_country"] = [r["verified_country"] for r in results]
     out["rejection_reasons"] = ["; ".join(r["reasons"]) for r in results]
     return out
+
+
+# ---------------------------------------------------------------------------
+# [2b] GEO VERIFICATION — xác minh quốc gia bằng NỘI DUNG website
+#      (search engine không cho biết công ty ở đâu; domain .com cũng không.
+#       Cách duy nhất đáng tin: đọc trang web và tìm bằng chứng địa lý.)
+# ---------------------------------------------------------------------------
+
+# Quốc gia MỤC TIÊU (Mỹ + Châu Âu). Ngoài danh sách này -> loại.
+TARGET_COUNTRIES = {
+    "USA", "UK", "Germany", "France", "Italy", "Spain", "Netherlands",
+    "Belgium", "Austria", "Switzerland", "Ireland", "Portugal", "Luxembourg",
+    "Sweden", "Denmark", "Finland", "Norway", "Poland", "Czech", "Slovakia",
+    "Hungary", "Romania", "Bulgaria", "Slovenia", "Croatia", "Estonia",
+    "Latvia", "Lithuania", "Greece", "Turkey", "EU",
+}
+
+# Quốc gia LOẠI THẲNG khi phát hiện (nguồn SEO spam chính)
+BANNED_COUNTRIES = {
+    "China", "India", "Pakistan", "Taiwan", "Vietnam", "Thailand",
+    "Indonesia", "Malaysia", "UAE",
+}
+
+US_STATE_NAMES = (
+    r"Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|"
+    r"Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|"
+    r"Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|"
+    r"Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|"
+    r"New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|"
+    r"Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|"
+    r"Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming"
+)
+US_STATE_ABBR = (
+    r"AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|"
+    r"MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|"
+    r"VT|VA|WA|WV|WI|WY"
+)
+
+# (regex, trọng số, nhãn bằng chứng) — trọng số cao = bằng chứng mạnh
+GEO_SIGNALS = {
+    "China": [
+        (r"ICP\s*备|ICP备|[京沪粤浙苏鲁冀津]ICP", 4.0, "giấy phép ICP"),
+        (r"\+\s?86[\s\-)]?\d|\b86-(?:\d{2,3})-\d", 3.5, "điện thoại +86"),
+        (r"\b(Ningbo|Wenzhou|Handan|Yongnian|Haiyan|Dongguan|Shenzhen|"
+         r"Jiaxing|Hebei|Zhejiang|Jiangsu|Guangdong|Shandong|Xingtai|"
+         r"Qingdao|Suzhou|Tianjin|Shanghai|Guangzhou)\b", 2.5, "địa danh TQ"),
+        (r"Made in China|China factory|Chinese manufactur", 2.0, "'China'"),
+        (r"[一-鿿]{4,}", 2.0, "chữ Hán"),
+    ],
+    "India": [
+        (r"\+\s?91[\s\-)]?\d{4}", 3.5, "điện thoại +91"),
+        (r"\bGSTIN?\b|\bIS\s?1367\b|\bIEC\s?\d{10}\b", 3.0, "GST/IS 1367"),
+        (r"\b(Mumbai|Ludhiana|Rajkot|Jamnagar|Ahmedabad|Pune|Chennai|"
+         r"Kolkata|Maharashtra|Gujarat|Punjab|Tamil Nadu|Haryana|"
+         r"Navi Mumbai|Thane)\b", 2.5, "địa danh Ấn Độ"),
+        (r"₹|\bRs\.?\s?\d", 2.0, "giá rupee"),
+    ],
+    "Taiwan": [
+        (r"\+\s?886[\s\-)]?\d", 3.5, "điện thoại +886"),
+        (r"\b(Taichung|Kaohsiung|Tainan|Changhua|Taipei)\b", 2.5,
+         "địa danh Đài Loan"),
+    ],
+    "Pakistan": [(r"\+\s?92[\s\-)]?\d", 3.5, "điện thoại +92"),
+                 (r"\b(Karachi|Lahore|Sialkot)\b", 2.5, "địa danh Pakistan")],
+    "Vietnam": [(r"\+\s?84[\s\-)]?\d", 3.5, "điện thoại +84")],
+    "Thailand": [(r"\+\s?66[\s\-)]?\d", 3.5, "điện thoại +66")],
+    "Malaysia": [(r"\+\s?60[\s\-)]?\d", 3.5, "điện thoại +60")],
+    "Indonesia": [(r"\+\s?62[\s\-)]?\d", 3.5, "điện thoại +62")],
+    "UAE": [(r"\+\s?971[\s\-)]?\d", 3.5, "điện thoại +971"),
+            (r"\b(Dubai|Sharjah|Abu Dhabi)\b", 2.5, "địa danh UAE")],
+
+    # --- Mỹ & Châu Âu ---
+    "USA": [
+        (rf"\b(?:{US_STATE_ABBR})[\s,]+\d{{5}}(?:-\d{{4}})?\b", 3.5,
+         "địa chỉ bang + ZIP"),
+        (r"\b(?:800|888|877|866|855)[\s\-.]\d{3}[\s\-.]\d{4}\b", 2.5,
+         "hotline toll-free"),
+        (rf"\b(?:{US_STATE_NAMES})\b", 2.0, "tên bang"),
+        (r"\bUnited States\b|\bU\.S\.A\.|\bUSA\b", 1.5, "'USA'"),
+        (r"\bASTM\s?A\d{2,3}\b|\bSAE\s?J\d{3}\b|\bANSI\b|\bUNC\b|\bUNF\b",
+         1.5, "tiêu chuẩn Mỹ"),
+        (r"\bInc\.|\bLLC\b|\bCorp\.", 1.0, "loại hình Inc/LLC"),
+    ],
+    "UK": [
+        (r"\+\s?44[\s\-)]?\d", 3.0, "điện thoại +44"),
+        (r"\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b", 2.5, "mã bưu chính UK"),
+        (r"\bVAT\s?(?:No\.?|number)?\s?GB\s?\d", 2.5, "VAT GB"),
+        (r"\bLtd\b|\bLimited\b|\bPLC\b", 1.0, "loại hình Ltd"),
+    ],
+    "Germany": [
+        (r"\+\s?49[\s\-)]?\d", 3.0, "điện thoại +49"),
+        (r"\bUSt-IdNr\.?\s?DE\s?\d|\bDE\d{9}\b", 2.5, "VAT DE"),
+        (r"\bGmbH\b|\bKG\b|\bAG\b", 1.5, "loại hình GmbH"),
+        (r"\bImpressum\b|Stra(?:ß|ss)e\b|\bD-\d{5}\b", 1.5, "Impressum/địa chỉ"),
+    ],
+    "France": [(r"\+\s?33[\s\-)]?\d", 3.0, "điện thoại +33"),
+               (r"\bSIRET\b|\bTVA\s?FR\d", 2.5, "SIRET/TVA FR"),
+               (r"\bSARL\b|\bSAS\b|\bS\.A\.S\b", 1.5, "loại hình SARL/SAS")],
+    "Italy": [(r"\+\s?39[\s\-)]?\d", 3.0, "điện thoại +39"),
+              (r"\bP\.?\s?IVA\b|\bpartita IVA\b", 2.5, "P.IVA"),
+              (r"\bS\.?r\.?l\.?\b|\bS\.?p\.?A\.?\b", 1.5, "loại hình Srl/SpA")],
+    "Spain": [(r"\+\s?34[\s\-)]?\d", 3.0, "điện thoại +34"),
+              (r"\bC\.?I\.?F\.?\s?[A-Z]\d{8}\b|\bNIF\b", 2.5, "CIF/NIF"),
+              (r"\bS\.?L\.?U?\.?\b|\bS\.?A\.?\b", 1.0, "loại hình SL/SA")],
+    "Netherlands": [(r"\+\s?31[\s\-)]?\d", 3.0, "điện thoại +31"),
+                    (r"\bKvK\b|\bBTW\s?NL\d", 2.5, "KvK/BTW"),
+                    (r"\bB\.?V\.?\b", 1.5, "loại hình BV")],
+    "Belgium": [(r"\+\s?32[\s\-)]?\d", 3.0, "điện thoại +32"),
+                (r"\bBTW\s?BE\d|\bTVA\s?BE\d", 2.5, "VAT BE")],
+    "Austria": [(r"\+\s?43[\s\-)]?\d", 3.0, "điện thoại +43"),
+                (r"\bATU\d{8}\b", 2.5, "VAT ATU")],
+    "Switzerland": [(r"\+\s?41[\s\-)]?\d", 3.0, "điện thoại +41"),
+                    (r"\bCHE-\d{3}\.\d{3}\.\d{3}\b", 2.5, "UID CHE")],
+    "Ireland": [(r"\+\s?353[\s\-)]?\d", 3.0, "điện thoại +353")],
+    "Portugal": [(r"\+\s?351[\s\-)]?\d", 3.0, "điện thoại +351"),
+                 (r"\bLda\b|\bNIPC\b", 1.5, "loại hình Lda")],
+    "Luxembourg": [(r"\+\s?352[\s\-)]?\d", 3.0, "điện thoại +352")],
+    "Sweden": [(r"\+\s?46[\s\-)]?\d", 3.0, "điện thoại +46"),
+               (r"\borganisationsnummer\b|\bSE\d{12}\b", 2.5, "org.nr"),
+               (r"\bAB\b(?!\s?C)", 1.0, "loại hình AB")],
+    "Denmark": [(r"\+\s?45[\s\-)]?\d", 3.0, "điện thoại +45"),
+                (r"\bCVR\b|\bA/S\b|\bApS\b", 2.0, "CVR/A-S")],
+    "Finland": [(r"\+\s?358[\s\-)]?\d", 3.0, "điện thoại +358"),
+                (r"\bY-tunnus\b|\bOy\b(?:\s|$)", 2.0, "Y-tunnus/Oy")],
+    "Norway": [(r"\+\s?47[\s\-)]?\d", 3.0, "điện thoại +47"),
+               (r"\borganisasjonsnummer\b|\bAS\b(?=\s|,|\.)", 1.5, "org.nr")],
+    "Poland": [(r"\+\s?48[\s\-)]?\d", 3.0, "điện thoại +48"),
+               (r"\bNIP\b|\bREGON\b", 2.5, "NIP/REGON"),
+               (r"Sp\.?\s?z\s?o\.?o\.?", 1.5, "loại hình Sp. z o.o.")],
+    "Czech": [(r"\+\s?420[\s\-)]?\d", 3.0, "điện thoại +420"),
+              (r"\bIČO?\b|\bDIČ\b|\bs\.r\.o\.", 2.0, "IČO/s.r.o.")],
+    "Slovakia": [(r"\+\s?421[\s\-)]?\d", 3.0, "điện thoại +421")],
+    "Hungary": [(r"\+\s?36[\s\-)]?\d", 3.0, "điện thoại +36"),
+                (r"\bKft\.?\b|\badószám\b", 2.0, "Kft/adószám")],
+    "Romania": [(r"\+\s?40[\s\-)]?\d", 3.0, "điện thoại +40"),
+                (r"\bS\.?R\.?L\.?\b|\bCUI\b", 1.5, "SRL/CUI")],
+    "Bulgaria": [(r"\+\s?359[\s\-)]?\d", 3.0, "điện thoại +359")],
+    "Slovenia": [(r"\+\s?386[\s\-)]?\d", 3.0, "điện thoại +386")],
+    "Croatia": [(r"\+\s?385[\s\-)]?\d", 3.0, "điện thoại +385")],
+    "Estonia": [(r"\+\s?372[\s\-)]?\d", 3.0, "điện thoại +372")],
+    "Latvia": [(r"\+\s?371[\s\-)]?\d", 3.0, "điện thoại +371")],
+    "Lithuania": [(r"\+\s?370[\s\-)]?\d", 3.0, "điện thoại +370")],
+    "Greece": [(r"\+\s?30[\s\-)]?\d", 3.0, "điện thoại +30")],
+    "Turkey": [(r"\+\s?90[\s\-)]?\d", 3.0, "điện thoại +90"),
+               (r"\bA\.?Ş\.?\b|Ltd\.?\s?Şti|\bSanayi\b|\bOSB\b", 2.0,
+                "A.Ş./Sanayi"),
+               (r"\b(İstanbul|Istanbul|İzmir|Bursa|Ankara|Konya|Gebze)\b",
+                2.0, "địa danh TNK")],
+}
+
+GEO_SIGNALS_COMPILED = {
+    country: [(re.compile(p), w, label) for p, w, label in pats]
+    for country, pats in GEO_SIGNALS.items()
+}
+
+GEO_MIN_SCORE = 2.5   # điểm tối thiểu để coi là đã xác minh được nước
+
+
+def detect_country_from_html(html):
+    """Suy ra quốc gia từ nội dung trang. Trả về (country, score, evidence).
+
+    country = '' nếu không đủ bằng chứng.
+    """
+    scores, evidence = {}, {}
+    for country, pats in GEO_SIGNALS_COMPILED.items():
+        total, found = 0.0, []
+        for pat, weight, label in pats:
+            if pat.search(html):
+                total += weight
+                found.append(label)
+        if total:
+            scores[country] = total
+            evidence[country] = found
+    if not scores:
+        return "", 0.0, []
+
+    # ƯU TIÊN TÍN HIỆU "LOẠI": công ty TQ/Ấn Độ bán hàng sang Mỹ thường
+    # đăng cả địa chỉ bang + ZIP của Mỹ và tiêu chuẩn ASTM, nên điểm USA có
+    # thể cao hơn. Nhưng công ty Mỹ thật gần như không bao giờ có số +86,
+    # +91, mã GST hay chữ Hán. Vì vậy hễ nước bị loại đủ điểm là nó thắng.
+    banned = {c: s for c, s in scores.items() if c in BANNED_COUNTRIES}
+    if banned:
+        worst = max(banned, key=banned.get)
+        if banned[worst] >= GEO_MIN_SCORE:
+            return worst, round(banned[worst], 1), evidence[worst]
+
+    best = max(scores, key=scores.get)
+    if scores[best] < GEO_MIN_SCORE:
+        return "", round(scores[best], 1), evidence.get(best, [])
+    return best, round(scores[best], 1), evidence[best]
+
+
+def restatus_by_geo(current_status, detected_country, geo_score):
+    """Quyết định lại status sau khi có bằng chứng địa lý.
+
+    Trả về (status, reason_thêm).
+    """
+    if detected_country in BANNED_COUNTRIES:
+        return "rejected", f"geo_outside_target:{detected_country}"
+    if detected_country in TARGET_COUNTRIES:
+        if current_status == "rejected":
+            return "rejected", ""          # đã bị loại vì lý do khác
+        return "qualified", ""
+    return current_status, "geo_unverified"
 
 
 # ---------------------------------------------------------------------------
@@ -549,44 +763,79 @@ def _classify_email(email, site_domain):
     return "external"
 
 
-def scrape_emails_for_site(website):
-    """Quét 1 website. Trả về dict:
+def scrape_site(website):
+    """Quét 1 website MỘT LẦT cho cả email và bằng chứng địa lý.
 
-    emails:  [(email, class, source_url)] — same/related trước, external sau
-    status:  found | not_found | timeout | blocked | error | http_*
+    Trả về dict:
+      emails: [(email, class, source_url)] — same/related trước, external sau
+      status: found | not_found | timeout | blocked | error | http_*
+      country / geo_score / geo_evidence: bằng chứng quốc gia từ nội dung
     """
     site_domain = _base_domain(_clean_domain(website))
-    found = {}  # email -> (class, source_url)
+    found = {}          # email -> (class, source_url)
+    html_all = []       # gom HTML để dò tín hiệu địa lý
 
     page, reason = _fetch(website)
     if page is None:
-        return {"emails": [], "status": reason}
+        return {"emails": [], "status": reason, "country": "",
+                "geo_score": 0.0, "geo_evidence": []}
     html, final_url = page
+    html_all.append(html)
 
     for e in _extract_emails_from_html(html):
         found.setdefault(e, (_classify_email(e, site_domain), final_url))
 
+    # Trang contact/impressum vừa nhiều email vừa nhiều bằng chứng địa chỉ
     for link in _find_contact_links(html, final_url):
-        if len(found) >= MAX_EMAILS_PER_SITE:
-            break
         sub, _ = _fetch(link)
         if sub is None:
             continue
-        for e in _extract_emails_from_html(sub[0]):
-            found.setdefault(e, (_classify_email(e, site_domain), link))
+        html_all.append(sub[0])
+        if len(found) < MAX_EMAILS_PER_SITE:
+            for e in _extract_emails_from_html(sub[0]):
+                found.setdefault(e, (_classify_email(e, site_domain), link))
 
     order = {"same_domain": 0, "related_domain": 1, "external": 2}
     ranked = sorted(((e, c, s) for e, (c, s) in found.items()),
                     key=lambda x: (order[x[1]], x[0]))[:MAX_EMAILS_PER_SITE]
-    return {"emails": ranked, "status": "found" if ranked else "not_found"}
+
+    country, geo_score, evidence = detect_country_from_html(
+        "\n".join(html_all))
+    # Email .cn/.in cũng là bằng chứng địa lý mạnh
+    if not country:
+        for e, _c, _s in ranked:
+            tld = "." + e.split(".")[-1]
+            for banned_tld, banned_country in ((".cn", "China"),
+                                               (".in", "India"),
+                                               (".tw", "Taiwan")):
+                if tld == banned_tld:
+                    country, geo_score = banned_country, 3.0
+                    evidence = [f"email {banned_tld}"]
+
+    return {"emails": ranked, "status": "found" if ranked else "not_found",
+            "country": country, "geo_score": geo_score,
+            "geo_evidence": evidence}
 
 
-def add_emails_to_csv(csv_path, out_path=None, workers=EMAIL_WORKERS,
-                      resume=True):
-    """Đọc CSV (cột `website`), quét email song song, ghi CSV/XLSX mới.
+def scrape_emails_for_site(website):
+    """Tương thích ngược: chỉ trả phần email của scrape_site()."""
+    r = scrape_site(website)
+    return {"emails": r["emails"], "status": r["status"]}
 
-    resume=True: nếu file output đã tồn tại, bỏ qua website đã quét xong
-    (checkpoint tự lưu sau mỗi CHECKPOINT_EVERY website).
+
+ENRICH_COLS = ("emails", "emails_external", "email_status",
+               "email_found_on", "detected_country", "geo_confidence",
+               "geo_evidence")
+
+
+def enrich_csv(csv_path, out_path=None, workers=EMAIL_WORKERS, resume=True):
+    """Đọc CSV (cột `website`), với MỖI website quét 1 lượt để lấy:
+      - email (kèm provenance)
+      - bằng chứng QUỐC GIA từ nội dung trang -> cập nhật lại
+        qualification_status (loại công ty ngoài Mỹ/Châu Âu)
+
+    resume=True: chạy lại chỉ quét website chưa xong (checkpoint mỗi
+    CHECKPOINT_EVERY website, ghi atomic nên an toàn khi dừng giữa chừng).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -595,28 +844,29 @@ def add_emails_to_csv(csv_path, out_path=None, workers=EMAIL_WORKERS,
         raise SystemExit(f"File {csv_path} không có cột 'website'")
     out_path = out_path or csv_path.replace(".csv", "_with_emails.csv")
 
-    for col in ("emails", "emails_external", "email_status",
-                "email_found_on"):
+    for col in ENRICH_COLS:
         if col not in df.columns:
             df[col] = ""
-    df = df.fillna({"emails": "", "emails_external": "", "email_status": "",
-                    "email_found_on": ""})
+    for col in ("qualification_status", "rejection_reasons",
+                "verified_country"):
+        if col not in df.columns:
+            df[col] = ""
+    df = df.fillna({c: "" for c in list(ENRICH_COLS) + [
+        "qualification_status", "rejection_reasons", "verified_country"]})
 
     # resume: nạp kết quả cũ nếu có
     if resume and os.path.exists(out_path):
         old = pd.read_csv(out_path).fillna("")
         if "website" in old.columns and "email_status" in old.columns:
-            done_map = old.set_index("website")[
-                ["emails", "emails_external", "email_status",
-                 "email_found_on"]].to_dict("index")
-            for col in ("emails", "emails_external", "email_status",
-                        "email_found_on"):
+            keep = [c for c in ENRICH_COLS if c in old.columns]
+            done_map = old.set_index("website")[keep].to_dict("index")
+            for col in keep:
                 df[col] = df.apply(
                     lambda r: done_map.get(r["website"], {}).get(col, "")
                     or r[col], axis=1)
 
     todo = df[df["email_status"] == ""]["website"].tolist()
-    print(f"Quét email: {len(todo)} website cần quét "
+    print(f"Quét email + xác minh quốc gia: {len(todo)} website "
           f"({len(df) - len(todo)} đã có từ lần trước), "
           f"{workers} luồng song song...")
 
@@ -630,29 +880,57 @@ def add_emails_to_csv(csv_path, out_path=None, workers=EMAIL_WORKERS,
         df.loc[mask, "email_status"] = result["status"]
         df.loc[mask, "email_found_on"] = "; ".join(pages)
 
+        country = result.get("country", "")
+        df.loc[mask, "detected_country"] = country
+        df.loc[mask, "geo_confidence"] = result.get("geo_score", 0.0)
+        df.loc[mask, "geo_evidence"] = "; ".join(result.get("geo_evidence",
+                                                            []))
+        # cập nhật lại status theo bằng chứng địa lý
+        for idx in df.index[mask]:
+            cur = df.at[idx, "qualification_status"] or "review"
+            new_status, reason = restatus_by_geo(
+                cur, country, result.get("geo_score", 0.0))
+            df.at[idx, "qualification_status"] = new_status
+            if country in TARGET_COUNTRIES:
+                df.at[idx, "verified_country"] = country
+            if reason:
+                old_r = str(df.at[idx, "rejection_reasons"] or "")
+                if reason not in old_r:
+                    df.at[idx, "rejection_reasons"] = "; ".join(
+                        x for x in [old_r, reason] if x)
+
     done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(scrape_emails_for_site, w): w for w in todo}
+        futures = {pool.submit(scrape_site, w): w for w in todo}
         for fut in as_completed(futures):
             w = futures[fut]
             done += 1
             try:
                 result = fut.result()
             except Exception:
-                result = {"emails": [], "status": "error"}
+                result = {"emails": [], "status": "error", "country": "",
+                          "geo_score": 0.0, "geo_evidence": []}
             _apply(w, result)
             n = len(result["emails"])
+            geo = result.get("country") or "?"
             print(f"  [{done}/{len(todo)}] {w} -> "
-                  f"{n if n else result['status']}")
+                  f"{n if n else result['status']} | {geo}")
             if done % CHECKPOINT_EVERY == 0:
                 save_tables(df, out_path, xlsx=False, quiet=True)
 
     save_tables(df, out_path)
     n_found = int((df["email_status"] == "found").sum())
-    breakdown = df["email_status"].value_counts().to_dict()
-    print(f"\n>> Có email: {n_found}/{len(df)} công ty | "
-          f"trạng thái: {breakdown}")
+    print(f"\n>> Có email: {n_found}/{len(df)} | "
+          f"email_status: {df['email_status'].value_counts().to_dict()}")
+    print(f">> Quốc gia phát hiện: "
+          f"{df['detected_country'].replace('', '(không rõ)').value_counts().to_dict()}")
+    print(f">> Sau xác minh: "
+          f"{df['qualification_status'].value_counts().to_dict()}")
     return df
+
+
+# tương thích ngược với notebook/script cũ
+add_emails_to_csv = enrich_csv
 
 
 # ---------------------------------------------------------------------------
@@ -768,8 +1046,9 @@ def main(argv=None):
     parser.add_argument("--cycles", type=lambda v: _positive(v, "--cycles"),
                         default=None, help="Giới hạn số vòng rồi dừng")
     parser.add_argument("--emails", metavar="FILE.CSV", default=None,
-                        help="Quét email các website trong file CSV "
-                             "(cột 'website'); tự resume nếu chạy lại")
+                        help="Với mỗi website: quét email VÀ xác minh quốc "
+                             "gia từ nội dung trang (loại công ty ngoài "
+                             "Mỹ/Châu Âu); tự resume nếu chạy lại")
     parser.add_argument("--requalify", metavar="FILE.CSV", default=None,
                         help="Chấm điểm qualification lại cho file CSV cũ")
     parser.add_argument("--deep", action="store_true",
@@ -781,7 +1060,7 @@ def main(argv=None):
     if args.emails:
         if not os.path.exists(args.emails):
             raise SystemExit(f"Không thấy file: {args.emails}")
-        add_emails_to_csv(args.emails)
+        enrich_csv(args.emails)
     elif args.requalify:
         if not os.path.exists(args.requalify):
             raise SystemExit(f"Không thấy file: {args.requalify}")
